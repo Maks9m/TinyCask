@@ -1,0 +1,2206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="An interactive explainer of TinyCask, a Bitcask-style key-value store in Go: append-only log, in-memory index, crash recovery and compaction.">
+<title>How TinyCask Works</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Space+Grotesk:wght@500;600;700&display=swap">
+<style>
+/* Layout: a sticky chapter rail on the left and one reading column; prose stays near 68ch while
+   figures and the simulator use the full column. Visual world: a storage engineer's datasheet —
+   cool paper, ink, one cobalt accent, eight key colours for records, monospace for every byte. */
+:root {
+  --paper: #F3F5F8;
+  --surface: #FFFFFF;
+  --sunken: #E9EDF3;
+  --ink: #131821;
+  --ink-2: #485164;
+  --ink-3: #6E788C;
+  --rule: #D6DCE5;
+  --accent: #2346C4;
+  --accent-ink: #FFFFFF;
+  --accent-soft: #E1E7FB;
+  --live: #17784A;
+  --live-soft: #DAF1E5;
+  --warn: #8E5D0E;
+  --warn-soft: #F5EAD3;
+  --bad: #BF2139;
+  --bad-soft: #FADFE4;
+  --tomb: #2A303C;
+  --tomb-ink: #F3F5F8;
+  --rec-ink: #FFFFFF;
+  --k0: #2F5FD6; --k1: #C2671C; --k2: #1F8F64; --k3: #AA3E8D;
+  --k4: #6E52CF; --k5: #9C7A0E; --k6: #15808F; --k7: #5E7024;
+  --code-bg: #EEF1F6;
+  --code-ink: #1A2030;
+  --tk-k: #2346C4;
+  --tk-s: #17784A;
+  --tk-c: #6E788C;
+  --tk-n: #A0521A;
+  --f-display: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-body: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0E1117; --surface: #161A22; --sunken: #1D222C; --ink: #E5E8EE; --ink-2: #A6AEBD; --ink-3: #828B9D; --rule: #2A303B;
+    --accent: #8098FF; --accent-ink: #0E1117; --accent-soft: #1E2645;
+    --live: #4CC38A; --live-soft: #15301F; --warn: #E0A84E; --warn-soft: #33270F; --bad: #FF6E83; --bad-soft: #3A1820;
+    --tomb: #D9DEE7; --tomb-ink: #0E1117; --rec-ink: #0B0E13;
+    --k0: #6E92F5; --k1: #E8914D; --k2: #45BD8E; --k3: #D66DBA; --k4: #9A84EE; --k5: #D2AE3C; --k6: #3FB8CA; --k7: #98AC47;
+    --code-bg: #12161D; --code-ink: #D9DEE7; --tk-k: #8FA6FF; --tk-s: #6FD3A0; --tk-c: #828B9D; --tk-n: #E7A26A;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0E1117; --surface: #161A22; --sunken: #1D222C; --ink: #E5E8EE; --ink-2: #A6AEBD; --ink-3: #828B9D; --rule: #2A303B;
+  --accent: #8098FF; --accent-ink: #0E1117; --accent-soft: #1E2645;
+  --live: #4CC38A; --live-soft: #15301F; --warn: #E0A84E; --warn-soft: #33270F; --bad: #FF6E83; --bad-soft: #3A1820;
+  --tomb: #D9DEE7; --tomb-ink: #0E1117; --rec-ink: #0B0E13;
+  --k0: #6E92F5; --k1: #E8914D; --k2: #45BD8E; --k3: #D66DBA; --k4: #9A84EE; --k5: #D2AE3C; --k6: #3FB8CA; --k7: #98AC47;
+  --code-bg: #12161D; --code-ink: #D9DEE7; --tk-k: #8FA6FF; --tk-s: #6FD3A0; --tk-c: #828B9D; --tk-n: #E7A26A;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { background: var(--paper); color: var(--ink); font: 16px/1.62 var(--f-body); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--paper); }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition: none !important; animation: none !important; } }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+::selection { background: var(--accent-soft); }
+
+.shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 56px; max-width: 1340px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+@media (max-width: 999px) { .shell { grid-template-columns: minmax(0, 1fr); gap: 0; } }
+
+/* ---------- chapter rail ---------- */
+.rail { position: sticky; top: env(safe-area-inset-top, 0px); align-self: start; max-height: 100vh; overflow-y: auto; padding-block: 36px 40px; font-size: 0.86rem; scrollbar-width: thin; }
+.rail-brand { font: 700 1rem/1.2 var(--f-display); letter-spacing: -0.01em; margin-bottom: 4px; }
+.rail-sub { color: var(--ink-3); font-size: 0.8rem; margin-bottom: 22px; }
+.rail-group { font: 600 0.68rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-3); margin: 18px 0 8px; }
+.rail ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.rail a { display: grid; grid-template-columns: 26px 1fr; gap: 4px; padding: 4px 8px; margin-left: -8px; border-radius: 5px; color: var(--ink-2); text-decoration: none; line-height: 1.35; }
+.rail a span:first-child { font: 500 0.72rem/1.6 var(--f-mono); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.rail a:hover { background: var(--sunken); color: var(--ink); }
+.rail a[aria-current="true"] { background: var(--accent-soft); color: var(--ink); }
+.rail a[aria-current="true"] span:first-child { color: var(--accent); }
+@media (max-width: 999px) { .rail { display: none; } }
+.rail-mobile { display: none; margin: 20px 0 0; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); }
+.rail-mobile summary { cursor: pointer; padding: 10px 14px; font-weight: 600; font-size: 0.92rem; }
+.rail-mobile ol { margin: 0; padding: 0 14px 12px 34px; columns: 2 180px; font-size: 0.9rem; }
+.rail-mobile li { break-inside: avoid; padding: 2px 0; }
+@media (max-width: 999px) { .rail-mobile { display: block; } }
+
+/* ---------- main column ---------- */
+main { min-width: 0; padding-block: 44px 120px; max-width: 1020px; }
+h1, h2, h3, h4 { font-family: var(--f-display); text-wrap: balance; letter-spacing: -0.015em; }
+.hero { padding-bottom: 36px; border-bottom: 1px solid var(--rule); }
+.eyebrow { font: 600 0.74rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); }
+.hero h1 { font-size: clamp(2.05rem, 3.4vw + 1rem, 3.35rem); line-height: 1.04; margin: 14px 0 18px; max-width: 18ch; font-weight: 700; }
+.lead { font-size: 1.14rem; color: var(--ink-2); max-width: 62ch; margin: 0; }
+.route { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-top: 28px; padding: 0; list-style: none; counter-reset: route; }
+.route li { counter-increment: route; padding: 14px 16px; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); font-size: 0.92rem; color: var(--ink-2); }
+.route li::before { content: "Step " counter(route); display: block; font: 600 0.7rem/1 var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); margin-bottom: 6px; }
+.route b { color: var(--ink); font-weight: 600; }
+
+.chapter { padding-top: 64px; scroll-margin-top: 12px; }
+.chapter-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin-bottom: 18px; }
+.chapter-num { font: 500 0.82rem/1 var(--f-mono); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.chapter h2 { font-size: clamp(1.6rem, 1.2vw + 1.2rem, 2.1rem); line-height: 1.12; margin: 0; flex-basis: 100%; order: 2; }
+.ref { font: 500 0.74rem/1 var(--f-mono); color: var(--ink-2); background: var(--sunken); padding: 4px 7px; border-radius: 4px; }
+.chapter > p, .chapter > ul, .chapter > ol, .chapter > h3, .chapter > .why, .chapter > .note, .chapter > .kicker { max-width: 68ch; }
+.chapter > p { margin: 0 0 14px; }
+.chapter h3 { font-size: 1.2rem; margin: 34px 0 10px; font-weight: 600; }
+.chapter ul, .chapter ol { padding-left: 1.25em; margin: 0 0 16px; }
+.chapter li { margin: 4px 0; }
+.chapter li::marker { color: var(--ink-3); }
+.kicker { font-size: 1.06rem; color: var(--ink-2); }
+strong, b { font-weight: 600; }
+code { font: 0.86em/1 var(--f-mono); background: var(--sunken); padding: 2px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+pre { margin: 12px 0 18px; padding: 15px 18px; background: var(--code-bg); color: var(--code-ink); border: 1px solid var(--rule); border-radius: 8px; overflow-x: auto; font: 13.4px/1.6 var(--f-mono); max-width: 100%; }
+pre code { background: none; padding: 0; font: inherit; overflow-wrap: normal; }
+.tk-k { color: var(--tk-k); font-weight: 500; }
+.tk-s { color: var(--tk-s); }
+.tk-c { color: var(--tk-c); font-style: italic; }
+.tk-n { color: var(--tk-n); }
+
+.tbl { overflow-x: auto; margin: 10px 0 20px; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+th { text-align: left; font: 600 0.7rem/1.3 var(--f-mono); text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-3); padding: 10px 12px; border-bottom: 1px solid var(--rule); background: var(--sunken); white-space: nowrap; }
+td { padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td code { white-space: nowrap; }
+.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.why { margin: 22px 0; padding: 16px 18px 6px; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); }
+.why > .tag { display: inline-block; font: 600 0.68rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.09em; color: var(--accent-ink); background: var(--accent); padding: 4px 7px; border-radius: 4px; margin-bottom: 10px; }
+.why .q { font-weight: 600; margin: 0 0 6px; }
+.why p { margin: 0 0 10px; color: var(--ink-2); }
+.note { font-size: 0.93rem; color: var(--ink-2); border-top: 1px dashed var(--rule); padding-top: 10px; margin-top: 16px; }
+.note b { color: var(--ink); }
+
+figure { margin: 22px 0 26px; }
+.fig { padding: 20px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; }
+.fig svg { display: block; width: 100%; height: auto; }
+.fig-scroll { overflow-x: auto; }
+.fig-scroll svg { min-width: 560px; }
+figcaption { font-size: 0.86rem; color: var(--ink-3); margin-top: 10px; max-width: 72ch; }
+.svg-box { fill: var(--surface); stroke: var(--rule); stroke-width: 1.5; }
+.svg-sunken { fill: var(--sunken); stroke: var(--rule); stroke-width: 1; }
+.svg-t { fill: var(--ink); font: 500 13px var(--f-mono); }
+.svg-t2 { fill: var(--ink-2); font: 400 12px var(--f-mono); }
+.svg-h { fill: var(--ink); font: 600 14px var(--f-display); }
+.svg-cap { fill: var(--ink-3); font: 500 11px var(--f-mono); letter-spacing: 0.04em; }
+.svg-line { stroke: var(--ink-3); stroke-width: 1.5; fill: none; }
+.svg-accent { stroke: var(--accent); stroke-width: 2; fill: none; }
+.svg-accent-fill { fill: var(--accent); }
+.svg-bad { stroke: var(--bad); stroke-width: 2; fill: none; }
+.svg-bad-fill { fill: var(--bad); }
+.svg-dash { stroke-dasharray: 5 4; }
+.svg-k0 { fill: var(--k0); } .svg-k1 { fill: var(--k1); } .svg-k2 { fill: var(--k2); }
+.svg-rec-t { fill: var(--rec-ink); font: 600 12px var(--f-mono); }
+.svg-dead { fill: color-mix(in srgb, var(--k0) 24%, var(--surface)); }
+.svg-dead-t { fill: var(--ink-2); font: 500 12px var(--f-mono); }
+.svg-free { fill: var(--sunken); stroke: var(--rule); stroke-dasharray: 4 3; }
+
+/* ---------- simulator ---------- */
+.sim { margin: 18px 0 24px; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.sim-controls { display: flex; flex-wrap: wrap; gap: 12px 18px; padding: 16px; border-bottom: 1px solid var(--rule); background: var(--sunken); align-items: flex-end; }
+.ctl-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-end; }
+.ctl-group > .ctl-label { flex-basis: 100%; font: 600 0.66rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-3); margin-bottom: 2px; }
+.field { display: grid; gap: 3px; font: 500 0.7rem/1 var(--f-mono); color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; }
+.field input, .field select { font: 500 0.95rem/1.2 var(--f-mono); color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 7px 9px; width: 9.5em; min-width: 0; text-transform: none; letter-spacing: 0; }
+.field select { width: auto; }
+.field input:focus, .field select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+.btn { font: 600 0.84rem/1 var(--f-body); color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 9px 12px; cursor: pointer; white-space: nowrap; }
+.btn:hover:not(:disabled) { border-color: var(--ink-3); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.danger { color: var(--bad); }
+.btn.danger:hover:not(:disabled) { border-color: var(--bad); }
+.btn.call-out { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); box-shadow: 0 0 0 4px var(--accent-soft); }
+.sim-status { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--rule); font-size: 0.84rem; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font: 600 0.74rem/1 var(--f-mono); padding: 5px 9px; border-radius: 99px; background: var(--sunken); color: var(--ink-2); }
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pill.good { background: var(--live-soft); color: var(--live); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.info { background: var(--accent-soft); color: var(--accent); }
+.sim-stats { margin-left: auto; font: 500 0.78rem/1.4 var(--f-mono); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) { .sim-stats { margin-left: 0; flex-basis: 100%; } }
+.sim-body { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); }
+@media (max-width: 760px) { .sim-body { grid-template-columns: minmax(0, 1fr); } }
+.sim-panel { padding: 16px; min-width: 0; }
+.sim-panel + .sim-panel { border-left: 1px solid var(--rule); }
+@media (max-width: 760px) { .sim-panel + .sim-panel { border-left: 0; border-top: 1px solid var(--rule); } }
+.panel-title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font: 600 0.7rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-3); margin: 0 0 12px; }
+.panel-title em { font-style: normal; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.files { display: grid; gap: 12px; }
+.file-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; font: 500 0.78rem/1.3 var(--f-mono); margin-bottom: 4px; }
+.fname { color: var(--ink); font-weight: 600; }
+.ftag { font-size: 0.68rem; padding: 2px 6px; border-radius: 4px; background: var(--sunken); color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.05em; }
+.ftag.active { background: var(--accent-soft); color: var(--accent); }
+.ftag.tmp { background: var(--warn-soft); color: var(--warn); }
+.ftag.compact { background: var(--live-soft); color: var(--live); }
+.ftag.input { background: transparent; border: 1px dashed var(--ink-3); }
+.fsize { color: var(--ink-3); margin-left: auto; font-variant-numeric: tabular-nums; }
+.strip { position: relative; display: flex; height: 36px; background: repeating-linear-gradient(90deg, var(--sunken) 0 1px, transparent 1px 12px), var(--paper); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+.file.tmp .strip { border-style: dashed; }
+.cap { position: absolute; top: 0; bottom: 0; border-left: 2px dashed var(--ink-3); opacity: 0.5; pointer-events: none; }
+.rec { flex: none; height: 100%; display: flex; align-items: center; justify-content: center; padding: 0 4px; font: 600 11px/1 var(--f-mono); color: var(--rec-ink); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; border-right: 1px solid var(--surface); min-width: 0; }
+.rec span { overflow: hidden; text-overflow: ellipsis; }
+.rec.k0 { --kc: var(--k0); } .rec.k1 { --kc: var(--k1); } .rec.k2 { --kc: var(--k2); } .rec.k3 { --kc: var(--k3); }
+.rec.k4 { --kc: var(--k4); } .rec.k5 { --kc: var(--k5); } .rec.k6 { --kc: var(--k6); } .rec.k7 { --kc: var(--k7); }
+.rec[class*=" k"] { background-color: var(--kc); }
+.rec.dead { background-color: color-mix(in srgb, var(--kc) 24%, var(--surface)); color: var(--ink-2); font-weight: 500; background-image: repeating-linear-gradient(135deg, transparent 0 5px, color-mix(in srgb, var(--kc) 22%, transparent) 5px 7px); }
+.rec.tomb { background: var(--tomb); color: var(--tomb-ink); opacity: 0.85; }
+.rec.torn { background: var(--bad-soft); color: var(--bad); border: 2px dashed var(--bad); opacity: 1; }
+.rec.rot { background: var(--bad); color: #fff; opacity: 1; background-image: repeating-linear-gradient(45deg, transparent 0 4px, rgba(255, 255, 255, 0.22) 4px 6px); }
+.reserved { border: 2px dashed var(--accent); border-radius: 6px; padding: 8px 10px; font: 500 0.78rem/1.35 var(--f-mono); color: var(--accent); background: var(--accent-soft); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 14px; font: 500 0.72rem/1.3 var(--f-mono); color: var(--ink-3); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { display: inline-block; width: 18px; height: 12px; border-radius: 2px; }
+.kd { width: 100%; font: 500 0.82rem/1.3 var(--f-mono); font-variant-numeric: tabular-nums; }
+.kd th { font-size: 0.64rem; padding: 6px 8px; }
+.kd td { padding: 6px 8px; }
+.kd .chip { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+.kd .empty-row td { color: var(--ink-3); font-family: var(--f-body); font-size: 0.86rem; white-space: normal; }
+.kd tr.flash td { background: var(--accent-soft); }
+.chip.k0 { background: var(--k0); } .chip.k1 { background: var(--k1); } .chip.k2 { background: var(--k2); } .chip.k3 { background: var(--k3); }
+.chip.k4 { background: var(--k4); } .chip.k5 { background: var(--k5); } .chip.k6 { background: var(--k6); } .chip.k7 { background: var(--k7); }
+.sim-log { padding: 14px 16px 16px; border-top: 1px solid var(--rule); background: var(--paper); }
+.sim-log ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 260px; overflow-y: auto; }
+.sim-log li { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 10px; font-size: 0.87rem; line-height: 1.45; color: var(--ink-2); }
+.sim-log li:first-child { color: var(--ink); }
+.sim-log .op { font: 600 0.68rem/1.9 var(--f-mono); letter-spacing: 0.05em; color: var(--accent); }
+.sim-log li.err .op { color: var(--bad); }
+.try { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; padding: 0; margin: 14px 0 0; list-style: none; counter-reset: try; }
+.try li { counter-increment: try; margin: 0; padding: 12px 14px 12px 44px; position: relative; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; font-size: 0.9rem; color: var(--ink-2); }
+.try li::before { content: counter(try); position: absolute; left: 14px; top: 11px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font: 600 0.74rem/20px var(--f-mono); text-align: center; }
+.try b { color: var(--ink); }
+
+/* ---------- byte encoder ---------- */
+.enc { border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); overflow: hidden; margin: 18px 0 24px; }
+.enc-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; padding: 14px 16px; background: var(--sunken); border-bottom: 1px solid var(--rule); }
+.enc-hint { font-size: 0.82rem; color: var(--ink-3); flex-basis: 100%; margin: 0; }
+.bytes { display: flex; flex-wrap: wrap; gap: 14px 16px; padding: 18px 16px; }
+.bgroup { --fc: var(--accent); display: grid; gap: 5px; align-content: start; }
+.bgroup-label { font: 600 0.66rem/1.2 var(--f-mono); text-transform: uppercase; letter-spacing: 0.07em; color: var(--fc); white-space: nowrap; }
+.bgroup-label small { font-weight: 500; color: var(--ink-3); letter-spacing: 0.02em; text-transform: none; }
+.bcells { display: flex; flex-wrap: wrap; gap: 2px; max-width: 100%; }
+.byte { font: 500 12.5px/1 var(--f-mono); width: 27px; height: 29px; padding: 0; border-radius: 4px; border: 1px solid color-mix(in srgb, var(--fc) 45%, transparent); background: color-mix(in srgb, var(--fc) 13%, var(--surface)); color: var(--ink); cursor: pointer; text-transform: uppercase; }
+.byte:hover { border-color: var(--fc); }
+.byte.flipped { background: var(--bad); border-color: var(--bad); color: #fff; }
+.f-crc { --fc: var(--accent); } .f-ts { --fc: var(--k6); } .f-type { --fc: var(--k4); } .f-ksz { --fc: var(--k1); }
+.f-vsz { --fc: var(--k5); } .f-key { --fc: var(--k2); } .f-val { --fc: var(--k3); }
+.decode { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); border-top: 1px solid var(--rule); }
+@media (max-width: 700px) { .decode { grid-template-columns: minmax(0, 1fr); } }
+.decode dl { margin: 0; padding: 14px 16px; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; font-size: 0.86rem; }
+.decode dt { font: 500 0.74rem/1.6 var(--f-mono); color: var(--ink-3); }
+.decode dd { margin: 0; font-family: var(--f-mono); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.verdict { padding: 14px 16px; border-left: 1px solid var(--rule); font-size: 0.92rem; }
+@media (max-width: 700px) { .verdict { border-left: 0; border-top: 1px solid var(--rule); } }
+.verdict .pill { margin-bottom: 8px; }
+.verdict p { margin: 0 0 8px; color: var(--ink-2); }
+
+/* ---------- step-through stories ---------- */
+.story { border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); margin: 18px 0 24px; overflow: hidden; }
+.story-head { display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; align-items: center; padding: 12px 16px; background: var(--sunken); border-bottom: 1px solid var(--rule); }
+.story-title { font: 600 0.95rem/1.3 var(--f-display); }
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.tab { font: 600 0.78rem/1 var(--f-body); padding: 7px 10px; border-radius: 6px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink-2); cursor: pointer; }
+.tab[aria-selected="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.st-view { padding: 16px; min-height: 120px; }
+.st-foot { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--rule); }
+.st-count { font: 500 0.78rem/1 var(--f-mono); color: var(--ink-3); margin-right: auto; font-variant-numeric: tabular-nums; }
+.st-frame-title { font: 600 0.72rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); margin: 0 0 10px; }
+.st-note { margin: 12px 0 0; color: var(--ink-2); font-size: 0.93rem; max-width: 70ch; }
+.race td { font-size: 0.86rem; }
+.race tr.now td { background: var(--accent-soft); }
+.race tr.wrong td { background: var(--bad-soft); }
+.race td.mono { font-family: var(--f-mono); white-space: nowrap; }
+.result { margin-top: 12px; padding: 12px 14px; border-radius: 8px; font-size: 0.92rem; }
+.result.bad { background: var(--bad-soft); color: var(--ink); }
+.result.good { background: var(--live-soft); color: var(--ink); }
+.mini { display: grid; gap: 8px; }
+.mini-file { display: grid; grid-template-columns: 9.5em minmax(0, 1fr) auto; gap: 10px; align-items: center; font: 500 0.8rem/1.3 var(--f-mono); }
+@media (max-width: 520px) { .mini-file { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
+.mini-recs { display: flex; gap: 3px; flex-wrap: wrap; }
+.mrec { display: inline-block; padding: 6px 9px; border-radius: 4px; font: 600 0.76rem/1 var(--f-mono); color: var(--rec-ink); background: var(--k0); }
+.mrec.dead { background: color-mix(in srgb, var(--k0) 24%, var(--surface)); color: var(--ink-2); }
+.mrec.tomb { background: var(--tomb); color: var(--tomb-ink); }
+.mrec.empty { background: transparent; color: var(--ink-3); border: 1px dashed var(--rule); }
+.mrec.back { background: var(--bad); color: #fff; }
+.mini-file.gone { opacity: 0.4; text-decoration: line-through; }
+.mini-tag { font-size: 0.7rem; color: var(--ink-3); }
+.mini-tag.hot { color: var(--bad); font-weight: 600; }
+.mini-kd { margin-top: 10px; font: 500 0.84rem/1.4 var(--f-mono); }
+
+/* ---------- flows and diagrams in HTML ---------- */
+.flow { list-style: none; padding: 0; margin: 14px 0 22px; display: grid; gap: 0; counter-reset: flow; }
+.flow > li { counter-increment: flow; position: relative; padding: 10px 14px 10px 46px; border: 1px solid var(--rule); background: var(--surface); margin-top: -1px; font-size: 0.94rem; }
+.flow > li:first-child { border-radius: 8px 8px 0 0; margin-top: 0; }
+.flow > li:last-child { border-radius: 0 0 8px 8px; }
+.flow > li::before { content: counter(flow); position: absolute; left: 14px; top: 10px; font: 600 0.78rem/1.6 var(--f-mono); color: var(--ink-3); }
+.flow > li.locked { background: color-mix(in srgb, var(--accent-soft) 60%, var(--surface)); }
+.flow > li.locked::after { content: "writer lock held"; position: absolute; right: 12px; top: 11px; font: 600 0.62rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.07em; color: var(--accent); }
+@media (max-width: 560px) { .flow > li.locked::after { position: static; display: block; margin-top: 6px; } }
+.flow b { color: var(--ink); }
+.flow small { display: block; color: var(--ink-2); font-size: 0.86rem; margin-top: 2px; }
+.timeline { display: grid; gap: 14px; }
+.tl-row { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: 12px; align-items: center; }
+@media (max-width: 560px) { .tl-row { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
+.tl-label { font: 600 0.72rem/1.2 var(--f-mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3); }
+.tl-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.tl-file { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--rule); background: var(--sunken); font: 500 0.8rem/1.25 var(--f-mono); }
+.tl-file small { display: block; color: var(--ink-3); font-size: 0.68rem; margin-top: 2px; }
+.tl-file.in { border-color: var(--ink-3); border-style: dashed; }
+.tl-file.res { border: 2px dashed var(--accent); background: var(--accent-soft); color: var(--accent); }
+.tl-file.act { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.tl-file.act small { color: var(--accent-ink); opacity: 0.8; }
+.tl-file.out { background: var(--live-soft); border-color: var(--live); color: var(--live); }
+.layers { display: grid; gap: 0; margin: 16px 0 24px; }
+.layer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 14px; align-items: center; padding: 14px 16px; border: 1px solid var(--rule); background: var(--surface); }
+.layer:first-child { border-radius: 10px 10px 0 0; }
+.layer:last-child { border-radius: 0 0 10px 10px; }
+.layer h4 { margin: 0; font-size: 1rem; }
+.layer p { margin: 2px 0 0; font-size: 0.88rem; color: var(--ink-2); }
+.layer .badges { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 560px) { .layer { grid-template-columns: minmax(0, 1fr); } .layer .badges { justify-content: flex-start; } }
+.hop { display: flex; align-items: center; gap: 10px; padding: 6px 16px 6px 28px; font: 500 0.78rem/1.3 var(--f-mono); color: var(--accent); border-left: 1px solid var(--rule); border-right: 1px solid var(--rule); background: var(--paper); }
+.hop::before { content: "↓"; font-size: 1rem; }
+.order { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 18px; font: 600 0.86rem/1 var(--f-mono); }
+.order span { padding: 9px 12px; border-radius: 6px; background: var(--surface); border: 1px solid var(--rule); }
+.order i { font-style: normal; color: var(--ink-3); }
+.resp { font: 500 0.95rem/1.9 var(--f-mono); padding: 16px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; overflow-x: auto; white-space: nowrap; margin: 12px 0 8px; }
+.resp span { padding: 3px 4px; border-radius: 3px; }
+.resp .r-arr { background: color-mix(in srgb, var(--k4) 18%, transparent); }
+.resp .r-len { background: color-mix(in srgb, var(--k1) 18%, transparent); }
+.resp .r-dat { background: color-mix(in srgb, var(--k2) 18%, transparent); }
+.resp .r-crlf { color: var(--ink-3); }
+.legend-inline { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 0.84rem; color: var(--ink-2); margin: 0 0 18px; }
+.legend-inline span::before { content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; background: var(--c); }
+.ls { font: 500 0.9rem/1.7 var(--f-mono); padding: 14px 18px; background: var(--code-bg); color: var(--code-ink); border: 1px solid var(--rule); border-radius: 8px; overflow-x: auto; white-space: pre; margin: 12px 0 18px; }
+.ls em { font-style: normal; color: var(--tk-c); }
+
+/* ---------- glossary ---------- */
+.search { display: flex; gap: 10px; align-items: center; margin: 8px 0 14px; flex-wrap: wrap; }
+.search input { font: 500 0.95rem/1.2 var(--f-body); padding: 9px 12px; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); color: var(--ink); width: min(100%, 360px); }
+.search input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.search small { color: var(--ink-3); font-family: var(--f-mono); font-size: 0.78rem; }
+.gloss { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 10px; margin: 0; }
+.gloss > div { padding: 12px 14px; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; min-width: 0; }
+.gloss dt { font: 600 0.98rem/1.3 var(--f-display); }
+.gloss dd { margin: 6px 0 0; font-size: 0.89rem; color: var(--ink-2); }
+.gloss dd a { font-family: var(--f-mono); font-size: 0.78rem; white-space: nowrap; }
+.bar { flex: 1 1 160px; max-width: 320px; height: 8px; background: var(--sunken); border-radius: 99px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--live); transition: width 0.3s; }
+.foot { margin-top: 72px; padding-top: 18px; border-top: 1px solid var(--rule); font-size: 0.84rem; color: var(--ink-3); max-width: 72ch; }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <nav class="rail" aria-label="Chapters">
+    <div class="rail-brand">How TinyCask Works</div>
+    <div class="rail-sub">An interactive explainer</div>
+    <div class="rail-group">Foundations</div>
+    <ol>
+      <li><a href="#idea"><span>01</span><span>The big idea</span></a></li>
+      <li><a href="#sim"><span>02</span><span>Try it: simulator</span></a></li>
+      <li><a href="#record"><span>03</span><span>A record, byte by byte</span></a></li>
+      <li><a href="#files"><span>04</span><span>Files on disk</span></a></li>
+      <li><a href="#memory"><span>05</span><span>What lives in memory</span></a></li>
+    </ol>
+    <div class="rail-group">How it works</div>
+    <ol>
+      <li><a href="#paths"><span>06</span><span>Writing and reading</span></a></li>
+      <li><a href="#recovery"><span>07</span><span>Crash recovery</span></a></li>
+      <li><a href="#compaction"><span>08</span><span>Compaction</span></a></li>
+      <li><a href="#locks"><span>09</span><span>Locks and goroutines</span></a></li>
+      <li><a href="#durability"><span>10</span><span>Durability and fsync</span></a></li>
+      <li><a href="#errors"><span>11</span><span>Errors</span></a></li>
+      <li><a href="#protocol"><span>12</span><span>The network protocol</span></a></li>
+    </ol>
+    <div class="rail-group">How it's built</div>
+    <ol>
+      <li><a href="#packages"><span>13</span><span>Packages and layers</span></a></li>
+      <li><a href="#vfs"><span>14</span><span>The fake disk</span></a></li>
+      <li><a href="#testing"><span>15</span><span>Testing strategy</span></a></li>
+      <li><a href="#scope"><span>16</span><span>Scope and decisions</span></a></li>
+    </ol>
+    <div class="rail-group">Reference</div>
+    <ol>
+      <li><a href="#go"><span>17</span><span>Go idioms in the code</span></a></li>
+      <li><a href="#glossary"><span>18</span><span>Glossary</span></a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <div class="eyebrow">Interactive explainer · Bitcask-style storage in Go</div>
+      <h1>How TinyCask keeps your data, and why every piece is there</h1>
+      <p class="lead">TinyCask is a key-value database built like Bitcask: every write goes to the end of a file, and a hash map in memory remembers where the newest value of each key lives. This page explains how it is built, section by section, and lets you break a working model of the database in your browser.</p>
+      <ol class="route">
+        <li><b>Read chapters 1–5.</b> They give you the vocabulary everything else uses.</li>
+        <li><b>Play with the simulator</b> in chapter 2. Write, crash, compact and corrupt it.</li>
+        <li><b>Dip into the rest</b> in any order. The glossary links every term back to its chapter.</li>
+      </ol>
+      <details class="rail-mobile">
+        <summary>All 18 chapters</summary>
+        <ol>
+          <li><a href="#idea">The big idea</a></li><li><a href="#sim">Try it: simulator</a></li><li><a href="#record">A record, byte by byte</a></li>
+          <li><a href="#files">Files on disk</a></li><li><a href="#memory">What lives in memory</a></li><li><a href="#paths">Writing and reading</a></li>
+          <li><a href="#recovery">Crash recovery</a></li><li><a href="#compaction">Compaction</a></li><li><a href="#locks">Locks and goroutines</a></li>
+          <li><a href="#durability">Durability and fsync</a></li><li><a href="#errors">Errors</a></li><li><a href="#protocol">The network protocol</a></li>
+          <li><a href="#packages">Packages and layers</a></li><li><a href="#vfs">The fake disk</a></li><li><a href="#testing">Testing strategy</a></li>
+          <li><a href="#scope">Scope and decisions</a></li><li><a href="#go">Go idioms in the code</a></li><li><a href="#glossary">Glossary</a></li>
+        </ol>
+      </details>
+    </header>
+
+    <!-- 01 ============================================================ -->
+    <section class="chapter" id="idea">
+      <div class="chapter-head"><span class="chapter-num">01</span><span class="ref">§1 System overview</span><h2>The big idea</h2></div>
+      <p class="kicker">A key-value store is a dictionary that survives a restart. You <code>PUT user=ann</code>, the machine reboots, you <code>GET user</code> and get <code>ann</code> back.</p>
+      <p>Two requirements pull in opposite directions. To survive a restart, data must be on disk, and disk is slow. To be fast, lookups should happen in memory, and memory forgets everything when the process dies. TinyCask splits the job in two:</p>
+      <ul>
+        <li><b>The log, on disk, holds the data.</b> It is <i>append-only</i>: a new value is always written at the end of a file, and nothing already written is ever changed.</li>
+        <li><b>KeyDir, in memory, holds the index.</b> For every key it stores which file and which byte offset contain the newest value.</li>
+      </ul>
+      <figure class="fig">
+        <div class="fig-scroll">
+        <svg viewBox="0 0 720 250" role="img" aria-labelledby="f1t">
+          <title id="f1t">KeyDir in memory points at the newest record of each key in an append-only file on disk</title>
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="svg-accent-fill"/></marker>
+            <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--ink-3)"/></marker>
+          </defs>
+          <text x="20" y="28" class="svg-cap">RAM · LOST ON CRASH</text>
+          <rect x="20" y="40" width="222" height="120" rx="8" class="svg-box"/>
+          <text x="36" y="66" class="svg-h">KeyDir</text>
+          <line x1="36" y1="78" x2="226" y2="78" class="svg-line" stroke-width="1"/>
+          <text x="36" y="104" class="svg-t">user → file 1, @57</text>
+          <text x="36" y="138" class="svg-t">city → file 1, @28</text>
+          <text x="290" y="28" class="svg-cap">DISK · SURVIVES CRASH</text>
+          <text x="290" y="120" class="svg-t2">seg_1.data</text>
+          <rect x="290" y="132" width="123" height="46" class="svg-dead"/>
+          <rect x="413" y="132" width="128" height="46" class="svg-k1"/>
+          <rect x="541" y="132" width="128" height="46" class="svg-k0"/>
+          <rect x="669" y="132" width="36" height="46" class="svg-free"/>
+          <text x="351" y="160" text-anchor="middle" class="svg-dead-t">user=ann</text>
+          <text x="477" y="160" text-anchor="middle" class="svg-rec-t">city=Kyiv</text>
+          <text x="605" y="160" text-anchor="middle" class="svg-rec-t">user=bob</text>
+          <text x="290" y="196" class="svg-t2">0</text>
+          <text x="413" y="196" class="svg-t2">28</text>
+          <text x="541" y="196" class="svg-t2">57</text>
+          <text x="669" y="196" class="svg-t2">85</text>
+          <text x="290" y="226" class="svg-cap">OLD VERSION = GARBAGE</text>
+          <text x="560" y="226" class="svg-cap">NEXT WRITE GOES HERE →</text>
+          <path d="M226,100 C 420,40 560,70 600,128" class="svg-accent" marker-end="url(#ah)"/>
+          <path d="M226,134 C 330,134 440,104 474,128" class="svg-accent" marker-end="url(#ah)"/>
+        </svg>
+        </div>
+        <figcaption>Figure 1. Three writes: <code>user=ann</code>, <code>city=Kyiv</code>, <code>user=bob</code>. The file keeps all three. KeyDir points only at the newest version of each key; the first record is now garbage. Offsets are byte positions: each record is 21 header bytes plus the key and value, so <code>user=ann</code> takes 28 bytes. "@57" is where the record starts; the real KeyDir stores where the value starts (57 + 21 + 4 = 82) and computes the rest, as chapter 3 shows.</figcaption>
+      </figure>
+      <p>Think of a notebook in which you only ever write on the next empty line and never erase. A sticky note on the cover says on which line each name's latest entry is. Reading is fast: look at the sticky note, open the line. Writing is fast: always the next line. If the sticky note is lost, you rebuild it by reading the notebook from the first line to the last. That rebuild is <b>crash recovery</b>.</p>
+      <h3>Why append-only</h3>
+      <ol>
+        <li><b>Speed.</b> Writing at the end needs no search for a free place. Sequential writes are the fastest thing a disk does.</li>
+        <li><b>Safety.</b> Old data is never overwritten, so a crash in the middle of a write can only damage the last few bytes of the newest file. Everything before them is untouched.</li>
+        <li><b>Simplicity.</b> No free-space management, no update-in-place logic, no page splits.</li>
+      </ol>
+      <h3>What it costs, and what TinyCask does about it</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>Cost</th><th>TinyCask's answer</th></tr></thead>
+        <tbody>
+          <tr><td>Overwritten and deleted values keep taking disk space.</td><td><b>Compaction</b> copies only live records to a new file and deletes the old files (chapter 8).</td></tr>
+          <tr><td>Every key must fit in RAM.</td><td>Accepted, and a stated non-goal. One million keys need about 100–150 MB (chapter 5).</td></tr>
+          <tr><td>Startup reads every file to rebuild KeyDir.</td><td>Accepted for v1. Real Bitcask adds hint files to speed this up; out of scope here.</td></tr>
+          <tr><td>No range queries ("all keys starting with <code>user:</code>"): a hash map has no order.</td><td>Out of scope.</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Where the design comes from</h3>
+      <p>Justin Sheehy and David Smith described Bitcask in 2010 as the storage engine of the Riak database (company: Basho). TinyCask follows that design closely. Every part of it comes from a published design that ran in production.</p>
+      <div class="tbl"><table>
+        <thead><tr><th></th><th>Hash index + log<br>(Bitcask, TinyCask)</th><th>B-tree<br>(PostgreSQL, SQLite)</th><th>LSM tree<br>(RocksDB, LevelDB)</th></tr></thead>
+        <tbody>
+          <tr><td><b>Write</b></td><td>Append to the log</td><td>Find the page, change it in place</td><td>Append to a log, sort in memory, flush sorted files</td></tr>
+          <tr><td><b>Read</b></td><td>One hash lookup + one disk read</td><td>Walk the tree from root to leaf</td><td>Check memory, then several sorted files</td></tr>
+          <tr><td><b>Index in RAM</b></td><td>All keys</td><td>Only cached pages</td><td>Small summaries</td></tr>
+          <tr><td><b>Range queries</b></td><td>No</td><td>Yes</td><td>Yes</td></tr>
+          <tr><td><b>Best when</b></td><td>Keys fit in RAM; fast point reads and writes</td><td>General purpose</td><td>Write-heavy, data much larger than RAM</td></tr>
+        </tbody>
+      </table></div>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"Why not keep everything in a Go map and save it to a file when the program exits?"</p>
+        <p>A crash or power cut before the save loses everything since the last save. With the log, each write reaches the operating system before the client gets OK, so a process crash loses nothing that was acknowledged.</p>
+      </div>
+    </section>
+
+    <!-- 02 ============================================================ -->
+    <section class="chapter" id="sim">
+      <div class="chapter-head"><span class="chapter-num">02</span><span class="ref">§3–§5 in action</span><h2>Try it: a working model of TinyCask</h2></div>
+      <p>This model follows the same rules as the real engine: append-only files, rolling to a new file at a size limit, KeyDir, recovery with tail truncation and the supersede rule, and compaction in five steps. After every action it checks the design doc's invariants by scanning the files independently of KeyDir. Its logic was tested with 400 random runs that mix writes, deletes, crashes, torn writes and compaction steps.</p>
+      <div class="sim" id="simulator">
+        <div class="sim-controls">
+          <div class="ctl-group">
+            <span class="ctl-label">Data</span>
+            <label class="field" for="sim-key">key<input id="sim-key" value="user" maxlength="12" autocomplete="off" spellcheck="false"></label>
+            <label class="field" for="sim-val">value<input id="sim-val" value="cat" maxlength="24" autocomplete="off" spellcheck="false"></label>
+            <button class="btn primary" data-act="put">PUT</button>
+            <button class="btn" data-act="get">GET</button>
+            <button class="btn" data-act="del">DELETE</button>
+          </div>
+          <div class="ctl-group">
+            <span class="ctl-label">Compaction</span>
+            <button class="btn" data-act="cstep" id="cstep">Start (step 1/5)</button>
+            <button class="btn" data-act="call">Run all steps</button>
+          </div>
+          <div class="ctl-group">
+            <span class="ctl-label">Break it</span>
+            <button class="btn danger" data-act="crash">Crash (kill -9)</button>
+            <button class="btn danger" data-act="torn">Crash mid-write</button>
+            <button class="btn danger" data-act="rot">Bit rot in an old file</button>
+            <button class="btn" data-act="repair" id="repair">Undo bit rot</button>
+          </div>
+          <div class="ctl-group">
+            <span class="ctl-label">Process</span>
+            <button class="btn" data-act="restart" id="restart">Restart</button>
+            <button class="btn" data-act="reset">Reset</button>
+          </div>
+        </div>
+        <div class="sim-status">
+          <span class="pill good" id="st-proc">Running</span>
+          <span class="pill" id="st-merge">No compaction</span>
+          <span class="pill good" id="st-inv">Invariants hold</span>
+          <span class="sim-stats" id="st-stats"></span>
+        </div>
+        <div class="sim-body">
+          <div class="sim-panel">
+            <div class="panel-title">Disk <em>files in ID order · width = bytes</em></div>
+            <div class="files" id="sim-files"></div>
+            <div class="legend">
+              <span><i style="background: var(--k0)"></i>live record</span>
+              <span><i style="background: color-mix(in srgb, var(--k0) 24%, var(--surface)); outline: 1px solid var(--rule); outline-offset: -1px"></i>garbage</span>
+              <span><i style="background: var(--tomb)"></i>tombstone</span>
+              <span><i style="background: var(--bad-soft); outline: 2px dashed var(--bad); outline-offset: -2px"></i>torn</span>
+              <span><i style="background: var(--bad)"></i>bit rot</span>
+              <span><i style="border-left: 2px dashed var(--ink-3); border-radius: 0; width: 10px"></i>roll limit (128 B)</span>
+            </div>
+          </div>
+          <div class="sim-panel">
+            <div class="panel-title">KeyDir <em>in RAM</em></div>
+            <table class="kd"><thead><tr><th>key</th><th>file</th><th>record @</th><th>size</th></tr></thead><tbody id="sim-kd"></tbody></table>
+            <p class="note" style="margin-top: 12px">Shown as record offsets for readability. The real <code>CommandIndex</code> stores the value offset and derives these.</p>
+          </div>
+        </div>
+        <div class="sim-log">
+          <div class="panel-title">What happened <em>newest first</em></div>
+          <ol id="sim-log" aria-live="polite"></ol>
+        </div>
+      </div>
+      <p class="note"><b>Simulator limits:</b> keys up to 12 bytes, values up to 24 bytes, files roll at 128 bytes. The real defaults are 1 KiB, 1 MiB and 64 MiB. File names are shortened (<code>seg_3.data</code> instead of <code>seg_0000000003.data</code>). It loads with five example writes so there is something to look at.</p>
+      <h3>Try this</h3>
+      <ol class="try">
+        <li><b>PUT</b> <code>user</code> three times with different values. Older versions fade: they are garbage. KeyDir points only at the newest.</li>
+        <li><b>DELETE</b> <code>user</code>. A dark tombstone is appended and the key leaves KeyDir. The old values are still on disk.</li>
+        <li>Keep writing until the active file fills up. It becomes <b>sealed</b> and a new file becomes active.</li>
+        <li>Press <b>Crash mid-write</b>, then <b>Restart</b>. Recovery cuts off the torn record and the previous value is back.</li>
+        <li>Press <b>Start</b> under Compaction, then step to 3/5. Now PUT a key that exists. At step 4 that key is "left alone".</li>
+        <li>Start a compaction, step past 3/5 (rename), press <b>Crash</b>, then <b>Restart</b>. Recovery deletes the old files because the output supersedes them.</li>
+        <li>With two or more files, press <b>Bit rot in an old file</b>, then <b>GET</b> the damaged key (the log names it). You get <code>ErrCorrupt</code>, never a wrong value.</li>
+        <li>Now <b>DELETE</b> that key and press <b>Restart</b>. The database still refuses to open, although the key is gone. That is fail-stop; <a href="#recovery">chapter 7</a> explains why deleting doesn't help.</li>
+      </ol>
+    </section>
+
+    <!-- 03 ============================================================ -->
+    <section class="chapter" id="record">
+      <div class="chapter-head"><span class="chapter-num">03</span><span class="ref">§3.1 Record</span><h2>A record, byte by byte</h2></div>
+      <p>Every PUT and DELETE becomes one <b>record</b> appended to the active file. The design doc calls it a <i>frame</i>. A record is a 21-byte header followed by the key and the value.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Bytes</th><th>Field</th><th>Size</th><th>What it is for</th></tr></thead>
+        <tbody>
+          <tr><td class="num">0–3</td><td><b>CRC32</b></td><td class="num">4</td><td>Checksum of bytes 4 to the end of the record. Detects torn writes and bit rot.</td></tr>
+          <tr><td class="num">4–11</td><td><b>Timestamp</b></td><td class="num">8</td><td>Nanoseconds since 1 Jan 1970 (Unix epoch). For people and debugging only.</td></tr>
+          <tr><td class="num">12</td><td><b>Type</b></td><td class="num">1</td><td><code>1</code> = PUT, <code>2</code> = DELETE (tombstone). Any other value means corruption.</td></tr>
+          <tr><td class="num">13–16</td><td><b>Key size</b></td><td class="num">4</td><td>Key length in bytes, 1–1024.</td></tr>
+          <tr><td class="num">17–20</td><td><b>Value size</b></td><td class="num">4</td><td>Value length in bytes, 0–1 MiB. Always 0 for a tombstone.</td></tr>
+          <tr><td class="num">21…</td><td><b>Key</b></td><td class="num">K</td><td>The key bytes.</td></tr>
+          <tr><td class="num">21+K…</td><td><b>Value</b></td><td class="num">V</td><td>The value bytes.</td></tr>
+        </tbody>
+      </table></div>
+      <p>21 = 4 + 8 + 1 + 4 + 4. Edit the key and value below and watch the bytes change. Then click any byte to flip one bit, the way a failing disk would, and see which check catches it.</p>
+      <div class="enc" id="encoder">
+        <div class="enc-controls">
+          <label class="field" for="enc-key">key<input id="enc-key" value="user" maxlength="32" autocomplete="off" spellcheck="false"></label>
+          <label class="field" for="enc-val">value<input id="enc-val" value="data" maxlength="48" autocomplete="off" spellcheck="false"></label>
+          <label class="field" for="enc-type">type<select id="enc-type"><option value="1">1 · PUT</option><option value="2">2 · DELETE</option></select></label>
+          <button class="btn" id="enc-reset">Undo bit flips</button>
+          <p class="enc-hint">Timestamp fixed at 2026-11-19 12:00:00 UTC. The default record's bytes match a Go program that uses <code>encoding/binary</code> and <code>hash/crc32</code>, byte for byte.</p>
+        </div>
+        <div class="bytes" id="enc-bytes"></div>
+        <div class="decode">
+          <dl id="enc-fields"></dl>
+          <div class="verdict" id="enc-verdict"></div>
+        </div>
+      </div>
+      <h3>Little-endian</h3>
+      <p>A number bigger than one byte has to be split into bytes, and the format must fix their order. <b>Little-endian</b> puts the least significant byte first: the key size 4 is stored as <code>04 00 00 00</code>, and 258 (hex <code>0x0102</code>) as <code>02 01 00 00</code>. x86 and ARM processors, your M1 included, work in little-endian, but the real point is that the order is fixed forever, so a file written on one machine reads the same on another. In Go: <code>binary.LittleEndian.PutUint32(buf[13:17], uint32(len(key)))</code>.</p>
+      <h3>CRC32</h3>
+      <p>A <b>checksum</b> is a short fingerprint of some data. CRC32 turns any number of bytes into a 32-bit number in a way that guarantees a different result for any single flipped bit and for any burst of damaged bits up to 32 bits long. On write we compute it over bytes 4 to the end and store it in bytes 0–3. On read we compute it again and compare. If they differ, the record is torn or rotted, and the engine returns <code>ErrCorrupt</code> instead of wrong data.</p>
+      <p>CRC is not cryptography: it catches accidents, not attackers. "IEEE" names the polynomial, the same one Ethernet and ZIP use; in Go it is <code>crc32.ChecksumIEEE</code>.</p>
+      <h3>Why each field is there</h3>
+      <ul>
+        <li><b>Type byte instead of "value size 0 means deleted".</b> Version 1.0 of the design doc marked deletes with value size 0. Then <code>PUT k ""</code> (an empty value) and <code>DELETE k</code> would look the same on disk. A separate type byte keeps empty values legal. This is correctness fix 2 in the design doc's change log.</li>
+        <li><b>The CRC also covers the key</b>, and GET compares the stored key with the requested one. If a bug made KeyDir point at a different record, that record's CRC could be valid, but the key check catches it.</li>
+        <li><b>The timestamp never decides which version wins.</b> Wall clocks jump: NTP corrections, manual changes, virtual machines. Ordering by time could bring back an old value. The position of a record, (file ID, offset), is the exact order of writes. The timestamp stays because the approved design has it, and it helps when you read a dump.</li>
+        <li><b>Lengths are checked before anything is allocated.</b> A damaged header might say the value is 4,000,000,000 bytes. Code that trusts it would try to allocate 4 GB and die. So the decoder checks, in order: enough bytes for a header, a known type, sizes within limits, enough bytes for the payload, and only then the CRC. The fuzz test <code>FuzzDecodeRecord</code> exists to prove this holds for any input.</li>
+      </ul>
+      <h3>Offsets: where things are</h3>
+      <p>An <b>offset</b> is a byte position in a file, counting from 0. KeyDir stores <code>ValueOffset</code>, where the value starts, because that is the struct the approved design doc defines. GET needs the whole record to check the CRC, so it computes the record's position:</p>
+      <pre><code class="go">RecordOffset = ValueOffset - 21 - len(key)
+RecordSize   = 21 + len(key) + ValueSize
+
+// user=bob written at offset 57 (Figure 1):
+// ValueOffset  = 57 + 21 + 4 = 82
+// RecordOffset = 82 - 21 - 4 = 57
+// RecordSize   = 21 + 4 + 3  = 28</code></pre>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"What happens if the power fails in the middle of writing a record?"</p>
+        <p>Only the end of the newest file can be incomplete. Recovery reads it, sees that the record is shorter than its header promises or that its CRC does not match, cuts it off and continues. That write never got an OK, so nothing acknowledged is lost.</p>
+      </div>
+    </section>
+
+    <!-- 04 ============================================================ -->
+    <section class="chapter" id="files">
+      <div class="chapter-head"><span class="chapter-num">04</span><span class="ref">§3.2 Data directory</span><h2>Files on disk</h2></div>
+      <p>The log is not one endless file. It is split into <b>segments</b>, files of up to 64 MiB. Only one segment, the <b>active</b> one, receives writes. When it is full it is <b>sealed</b> (also called immutable): fsynced and never written again. A new active segment is created. This is called a <b>roll</b> or <b>rotation</b>.</p>
+      <div class="ls">data/
+├── LOCK                      <em># held by the running process</em>
+├── compact_0000000004.data   <em># output of a compaction, replaced seg 1–3</em>
+├── seg_0000000005.data       <em># sealed</em>
+└── seg_0000000006.data       <em># active: the only file being written</em></div>
+      <div class="tbl"><table>
+        <thead><tr><th>File</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>seg_&lt;id&gt;.data</code></td><td>A regular segment. The highest ID is the active segment.</td></tr>
+          <tr><td><code>compact_&lt;id&gt;.data</code></td><td>Compaction output. Supersedes (replaces) every data file with a lower ID.</td></tr>
+          <tr><td><code>compact_&lt;id&gt;.tmp</code></td><td>A compaction that never finished. Deleted at startup.</td></tr>
+          <tr><td><code>LOCK</code></td><td>Proof that one process owns the directory.</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Why segments at all</h3>
+      <p>You cannot delete the beginning of a file. One endless file would only ever grow. With segments, compaction can delete whole old files and the disk space really comes back.</p>
+      <h3>Why IDs, and why 10 digits</h3>
+      <p>Every file gets a number, its <b>file ID</b>, and IDs only grow. The ID gives the order of the files: lower ID means older data. IDs are <code>uint32</code>, so at most 4,294,967,295, which has 10 digits. Zero-padding to 10 digits makes alphabetical order equal numeric order: <code>seg_0000000009</code> sorts before <code>seg_0000000010</code>, while <code>seg_9</code> would sort after <code>seg_10</code>. Gaps in IDs are normal, for example after an unfinished compaction.</p>
+      <h3>The supersede rule</h3>
+      <p>"<code>compact_M.data</code> supersedes every data file with an ID below M." Compaction always merges all older files into one output with ID M. If the process dies after the output is in place but before the old files are deleted, recovery sees the output and deletes the old files itself. One naming rule replaces a separate manifest file that would otherwise have to list which files are valid.</p>
+      <h3>The LOCK file</h3>
+      <p>The engine takes an exclusive <b>flock</b> on <code>LOCK</code>. flock is an <i>advisory</i> lock provided by the operating system: only one process can hold it, and the kernel releases it automatically when the process dies, even after <code>kill -9</code>. Without it, two TinyCask processes on the same directory would both append to the active file and mix their records into garbage. "Advisory" means it only stops programs that ask for the lock; a plain shell command would ignore it.</p>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"Why does compaction delete the old files last, not first?"</p>
+        <p>If the process died between "delete old files" and "make the output official", the data would exist nowhere. The order is: make the output durable and official, then delete. At every moment at least one complete copy of the data is valid on disk.</p>
+      </div>
+    </section>
+
+    <!-- 05 ============================================================ -->
+    <section class="chapter" id="memory">
+      <div class="chapter-head"><span class="chapter-num">05</span><span class="ref">§4 In-memory data model</span><h2>What lives in memory</h2></div>
+      <p><b>KeyDir</b> is a Go map from key to a small struct, protected by a read-write lock. The struct is exactly the one from the design doc:</p>
+      <pre><code class="go">type CommandIndex struct {
+    FileID      uint32 // which file holds the newest record
+    ValueSize   uint32 // value length in bytes
+    ValueOffset int64  // where the value starts inside that file
+    Timestamp   uint64 // informational only
+}
+
+type KeyDir struct {
+    mu    sync.RWMutex
+    index map[string]CommandIndex
+}</code></pre>
+      <p>The map key is a <code>string</code>, not a <code>[]byte</code>. Go does not allow slices as map keys (they cannot be compared with <code>==</code>), and converting <code>[]byte</code> to <code>string</code> copies the bytes, so the caller can reuse its buffer without corrupting the index.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Method</th><th>What it does</th><th>Who uses it</th></tr></thead>
+        <tbody>
+          <tr><td><code>Get(key)</code></td><td>Returns the entry, or "not found"</td><td>GET, compaction's liveness check</td></tr>
+          <tr><td><code>Put(key, e)</code></td><td>Sets the entry, returns the previous one</td><td>PUT, recovery</td></tr>
+          <tr><td><code>Delete(key)</code></td><td>Removes the entry, returns the previous one</td><td>DELETE, recovery</td></tr>
+          <tr><td><code>Len()</code></td><td>Number of live keys</td><td>Stats, invariant checks</td></tr>
+          <tr><td><code>UpdateIf(key, cond, new)</code></td><td>Replaces the entry only if <code>cond(old)</code> is true, atomically</td><td>Compaction's conditional swap (chapter 8)</td></tr>
+        </tbody>
+      </table></div>
+      <p>KeyDir never touches the disk. It only answers "where is it?". Keeping it free of I/O keeps its lock short, and it can be tested on its own under the race detector.</p>
+      <h3>Two counters and the garbage ratio</h3>
+      <ul>
+        <li><b>liveBytes</b>: total size of the records KeyDir points at. Changes when KeyDir changes.</li>
+        <li><b>diskBytes</b>: total size of all data files. Changes when files grow or are deleted.</li>
+        <li><b>Garbage ratio</b> = 1 − liveBytes / diskBytes. Example: 100 MB on disk, 40 MB live → 0.6. That is at least 0.5 and the disk holds at least 16 MiB, so automatic compaction starts.</li>
+      </ul>
+      <h3>How much RAM</h3>
+      <p>The design doc's estimate is N × (len(key) + 48 bytes): roughly 16 bytes for the string header, 24 bytes for <code>CommandIndex</code> (4 + 4 + 8 + 8), and a few bytes of map bookkeeping. For one million 32-byte keys the formula gives 80 MB. Go's map adds more overhead, which is why the target says 100–150 MB and a benchmark measures the real number instead of trusting the formula.</p>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"What if the keys don't fit in memory?"</p>
+        <p>Then this design is the wrong tool, and the design doc says so as a non-goal. Bitcask makes the same trade. An LSM tree such as RocksDB is the usual choice when the index cannot fit in RAM.</p>
+      </div>
+    </section>
+
+    <!-- 06 ============================================================ -->
+    <section class="chapter" id="paths">
+      <div class="chapter-head"><span class="chapter-num">06</span><span class="ref">§5.1–5.3 Put, Get, Delete</span><h2>Writing and reading</h2></div>
+      <h3>PUT, step by step</h3>
+      <ol class="flow">
+        <li><b>Check sizes and encode the whole record into one buffer.</b><small>No lock yet: encoding takes time and touches no shared state, so it would only make other writers wait.</small></li>
+        <li class="locked"><b>Take the writer lock.</b></li>
+        <li class="locked"><b>Refuse if the engine is read-only or closed. Roll if the record does not fit.</b><small>Roll = fsync and seal the active file, create the next one, fsync the directory.</small></li>
+        <li class="locked"><b>Append the record with a single <code>Write</code> call.</b><small>On an error or a short write: truncate the file back to its previous size. If even that fails, switch to read-only mode.</small></li>
+        <li class="locked"><b>If <code>sync=always</code>: fsync.</b><small>If fsync fails, switch to read-only mode and fail the write.</small></li>
+        <li class="locked"><b>Update KeyDir and the byte counters.</b></li>
+        <li><b>Release the lock and reply OK.</b></li>
+      </ol>
+      <ul>
+        <li><b>Why one Write call.</b> The file is opened with <code>O_APPEND</code>, so the kernel places each write at the current end of the file. One call per record means a record is never interleaved with another, and the only possible damage is a short tail.</li>
+        <li><b>Why truncate after a failed write.</b> A half-written record in the middle of the file would make recovery stop there and cut off every good record written after it. Truncating keeps the file clean, so later writes stay readable.</li>
+        <li><b>Why read-only when truncate or fsync fails.</b> At that point we no longer know what is on disk, and writing more could make it worse. Reads keep working. A restart runs recovery and finds out the truth.</li>
+        <li><b>Why KeyDir is updated after the write, not before.</b> A reader can only find a record that is completely written. No GET can ever see half a value.</li>
+        <li><b>Why the KeyDir update is under the same lock as the write.</b> Step through the bug below.</li>
+      </ul>
+      <div class="story" id="race">
+        <div class="story-head">
+          <span class="story-title">The lost update: two clients write the same key at once</span>
+          <div class="tabs" role="tablist">
+            <button class="tab" role="tab" aria-selected="true" data-v="split">Two locks (design doc v1.0)</button>
+            <button class="tab" role="tab" aria-selected="false" data-v="one">One writer lock (v1.1)</button>
+          </div>
+        </div>
+        <div class="st-view"></div>
+        <div class="st-foot"><span class="st-count"></span><button class="btn st-prev">Back</button><button class="btn primary st-next">Next</button></div>
+      </div>
+      <h3>GET, step by step</h3>
+      <ol class="flow">
+        <li><b>Look the key up in KeyDir under a read lock.</b><small>Missing → <code>ErrKeyNotFound</code>, with no disk access at all.</small></li>
+        <li><b>Compute the record's offset and size, and read the whole record with one <code>pread</code>.</b></li>
+        <li><b>Decode: check the CRC and compare the stored key.</b><small>Mismatch → <code>ErrCorrupt</code>. Never return data that failed the check.</small></li>
+        <li><b>Copy the value out and return it.</b><small>The caller owns the returned slice and may change it.</small></li>
+        <li><b>If the file vanished in between, go back to step 1.</b><small>Compaction may delete the old file between steps 1 and 2. The store reports <code>ErrSegmentNotFound</code>, and by then KeyDir already points at the new file. At most three tries.</small></li>
+      </ol>
+      <p><b>pread</b> means "positional read": read N bytes at offset X without moving a shared file position. Many goroutines can pread the same file at the same time without disturbing each other. In Go, <code>os.File.ReadAt</code> uses pread on Unix, and TinyCask's <code>vfs.File</code> exposes it through the <code>io.ReaderAt</code> interface. GET never takes the writer lock, so reads do not wait for writes.</p>
+      <h3>DELETE</h3>
+      <p>Under the writer lock: if the key is absent, return <code>ErrKeyNotFound</code> and write nothing. Otherwise append a <b>tombstone</b>, a record of type 2 with no value, and remove the key from KeyDir.</p>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"Why write a tombstone at all? Just remove the key from KeyDir."</p>
+        <p>KeyDir is lost on every restart and rebuilt from the files. The old PUT is still in the files. Without a tombstone after it, recovery would bring the key back on every restart.</p>
+      </div>
+    </section>
+
+    <!-- 07 ============================================================ -->
+    <section class="chapter" id="recovery">
+      <div class="chapter-head"><span class="chapter-num">07</span><span class="ref">§5.4 Open (recovery)</span><h2>Crash recovery</h2></div>
+      <p>Recovery runs every time the engine opens. It turns the files back into a KeyDir.</p>
+      <ol class="flow">
+        <li><b>Create the directory if needed and take the LOCK.</b><small>Already held by another process → <code>ErrLocked</code>.</small></li>
+        <li><b>Clean up.</b><small>Delete every <code>*.tmp</code> (an unfinished compaction). If a <code>compact_M.data</code> exists, delete every data file with ID &lt; M. fsync the directory.</small></li>
+        <li><b>Replay every file in ID order, each from offset 0.</b><small>PUT → set KeyDir[key]. Tombstone → remove the key. Later records overwrite earlier ones, so the newest version wins.</small></li>
+        <li><b>If a record fails to decode:</b><small>in the file with the highest ID → truncate there, fsync, log a warning, continue (a torn tail). In any other file → stop, and <code>Open</code> fails with <code>ErrCorrupt</code> naming the file and offset.</small></li>
+        <li><b>Create a new active segment with ID max + 1 and fsync the directory.</b></li>
+        <li><b>Start the background goroutines.</b></li>
+      </ol>
+      <figure class="fig">
+        <div class="mini">
+          <div class="mini-file"><span class="mini-name">seg_7.data</span><span class="mini-recs"><span class="mrec" style="background: var(--k2)">a=1</span><span class="mrec" style="background: var(--k1)">b=2</span><span class="mrec" style="background: var(--bad-soft); color: var(--bad); outline: 2px dashed var(--bad); outline-offset: -2px">torn</span></span><span class="mini-tag">newest file</span></div>
+          <div class="mini-file"><span class="mini-name"></span><span class="mini-recs" style="color: var(--live); font-weight: 600">→ cut off the torn tail, continue. Nothing acknowledged is lost.</span><span></span></div>
+          <div class="mini-file" style="margin-top: 12px"><span class="mini-name">seg_3.data</span><span class="mini-recs"><span class="mrec" style="background: var(--k2)">a=0</span><span class="mrec" style="background: var(--bad); color: #fff">bit rot</span><span class="mrec" style="background: var(--k3)">c=9</span></span><span class="mini-tag hot">older file</span></div>
+          <div class="mini-file"><span class="mini-name"></span><span class="mini-recs" style="color: var(--bad); font-weight: 600">→ refuse to open: ErrCorrupt in seg_3.data at its offset.</span><span></span></div>
+        </div>
+        <figcaption>Figure 2. The same symptom, a record that fails its check, means different things depending on where it is.</figcaption>
+      </figure>
+      <h3>Why only the newest file may have a torn tail</h3>
+      <p>Writes only ever go to the end of the active file, and the active file always has the highest ID. Older files were fsynced when they were sealed and are never written again. If one of them is damaged, that is not an interrupted write. Data the client was told is safe is broken: bit rot, a disk fault, someone edited the file. Truncating would silently delete acknowledged data. Skipping is not possible either: the length fields of a damaged header cannot be trusted, so nobody knows where the next record starts. So the database stops and reports exactly where the damage is. This behaviour is called <b>fail-stop</b>: better to refuse to run than to run with silently wrong data.</p>
+      <h3>Why deleting the damaged key doesn't help</h3>
+      <p>Suppose a record in an old file is damaged, and you then DELETE (or overwrite) its key. The database still refuses to open. That is intended.</p>
+      <ul>
+        <li><b>DELETE removes nothing.</b> It appends a tombstone to the active file. The damaged bytes stay exactly where they were. Recovery reads every file from offset 0, so it meets the damage before it ever reaches the tombstone.</li>
+        <li><b>Recovery cannot find the next record.</b> The damaged header's length fields cannot be trusted, so recovery does not know where the bad record ends. Every record after it in that file becomes unreadable, including live keys that nobody touched.</li>
+        <li><b>It cannot prove which key the record belongs to.</b> The flipped bit may be in the key itself. "This was <code>city</code>, and <code>city</code> was deleted later" cannot be concluded from a record that failed its checksum.</li>
+        <li><b>Compaction cannot clean it up.</b> The compactor reads the same files with the same decoder. It hits the bad record, deletes its <code>.tmp</code> and gives up (§5.5, failure handling). The damage stays until a person acts.</li>
+      </ul>
+      <p>The way out is a human decision: restore the file from a backup (the simulator's <b>Undo bit rot</b> button), or knowingly accept the loss, for example by moving the file out of the data directory. The engine never makes that choice on its own. ARCHITECTURE §14 lists "no salvage mode" as a known limitation.</p>
+      <p class="note">The simulator draws each damaged record with clear edges because it stores records as objects. The real engine only sees bytes, which is why the second point decides the matter.</p>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"The damaged record belongs to a key that was deleted later. Why not open anyway?"</p>
+        <p>Because the engine cannot know that safely: it cannot trust the damaged key bytes, and it cannot find where the next record starts, so live data after the damage is at stake too. Throwing away acknowledged data is a decision for a person, not for a database at startup. TinyCask stops, names the exact file and offset, and leaves the choice to the operator.</p>
+      </div>
+      <h3>The other rules</h3>
+      <ul>
+        <li><b>Why replay in (file ID, offset) order.</b> That is exactly the order in which the writes happened, so replaying it rebuilds exactly the state before the crash.</li>
+        <li><b>Why always a new active file.</b> The old active file may just have been truncated. A fresh file is simple, and no code ever appends to a file from a previous run.</li>
+        <li><b>Cost.</b> Startup time grows with the total size of the data, because every record is read. Accepted for v1.</li>
+        <li><b>Durability window.</b> With <code>sync=interval</code>, a power cut can also lose up to a second of acknowledged writes. That is the durability policy (chapter 10), not a recovery flaw.</li>
+      </ul>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"Isn't truncating dangerous? You delete data."</p>
+        <p>Only the record that failed the check, at the very end of the newest file. That record's PUT never returned OK: the client is told OK only after the write fully succeeded. Truncating removes a write that never happened from the client's point of view.</p>
+      </div>
+    </section>
+
+    <!-- 08 ============================================================ -->
+    <section class="chapter" id="compaction">
+      <div class="chapter-head"><span class="chapter-num">08</span><span class="ref">§5.5 Compaction</span><h2>Compaction</h2></div>
+      <p>Every overwrite and every delete leaves garbage behind. <b>Compaction</b> copies only the live records into a new file and deletes the old files, while clients keep reading and writing.</p>
+      <figure class="fig">
+        <div class="timeline">
+          <div class="tl-row"><span class="tl-label">Before</span><div class="tl-files"><span class="tl-file">seg_1<small>sealed</small></span><span class="tl-file">seg_2<small>sealed</small></span><span class="tl-file act">seg_3<small>active</small></span></div></div>
+          <div class="tl-row"><span class="tl-label">Step 1</span><div class="tl-files"><span class="tl-file in">seg_1<small>input</small></span><span class="tl-file in">seg_2<small>input</small></span><span class="tl-file in">seg_3<small>sealed now, input</small></span><span class="tl-file res">ID 4<small>reserved for output</small></span><span class="tl-file act">seg_5<small>new active</small></span></div></div>
+          <div class="tl-row"><span class="tl-label">After</span><div class="tl-files"><span class="tl-file out">compact_4<small>live records only</small></span><span class="tl-file act">seg_5<small>active</small></span></div></div>
+        </div>
+        <figcaption>Figure 3. The output ID (4) sits between the inputs (1–3) and every file written after the merge started (5 and up). Recovery replays in ID order, so this keeps replay order equal to write order.</figcaption>
+      </figure>
+      <ol class="flow">
+        <li class="locked"><b>Seal and reserve.</b><small>Seal the active file A, reserve ID M = A + 1 for the output, create the new active file A + 2. Inputs = every sealed file, all with ID &lt; M. Microseconds; then the lock is released.</small></li>
+        <li><b>Copy live records into <code>compact_M.tmp</code>.</b><small>Scan the inputs. A PUT record is live only if KeyDir points at exactly this record: same file ID and same offset. Comparing values is not enough, two versions may hold the same value. Each copied key is remembered in a pending list.</small></li>
+        <li><b>fsync the .tmp, rename it to <code>compact_M.data</code>, fsync the directory.</b><small>From this moment the output is official on disk.</small></li>
+        <li><b>Register the output in the segment set,</b><small>so GET can read from it.</small></li>
+        <li><b>Swap KeyDir entries in batches of at most 1024 keys.</b><small><code>UpdateIf(key, entry.FileID &lt; M, newEntry)</code>. Keys changed during the merge are left alone.</small></li>
+        <li><b>Drop the inputs from the segment set, delete the files, fsync the directory.</b></li>
+      </ol>
+      <p class="note">The simulator shows steps 3 and 4 as one step, so it counts five.</p>
+      <h3>The conditional swap</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>What happened to the key during the merge</th><th>KeyDir entry at swap time</th><th>Swap?</th><th>Why that is right</th></tr></thead>
+        <tbody>
+          <tr><td>Nothing</td><td>Points into an input (ID &lt; M)</td><td>Yes</td><td>The copy in M is the same record</td></tr>
+          <tr><td>Overwritten by a new PUT</td><td>Points into a newer file (ID &gt; M)</td><td>No</td><td>The newer value must win</td></tr>
+          <tr><td>Deleted</td><td>Missing</td><td>No</td><td>The tombstone sits in a file newer than M, so it also wins after a restart</td></tr>
+          <tr><td>Deleted, then written again</td><td>ID &gt; M</td><td>No</td><td>Same as overwritten</td></tr>
+        </tbody>
+      </table></div>
+      <div class="story" id="resurrect">
+        <div class="story-head"><span class="story-title">Why compaction must merge all old files: the resurrected key</span></div>
+        <div class="st-view"></div>
+        <div class="st-foot"><span class="st-count"></span><button class="btn st-prev">Back</button><button class="btn primary st-next">Next</button></div>
+      </div>
+      <h3>Why each rule is there</h3>
+      <ul>
+        <li><b>Why fsync before the rename.</b> Right after the rename, step 6 deletes the inputs. If the output's bytes were still only in the page cache when the power failed, there would be a partial output and no old files: data loss. So the output must be durable before it becomes official.</li>
+        <li><b>Why rename is the "commit".</b> <code>rename()</code> replaces a name atomically: anyone looking, recovery included, sees either the <code>.tmp</code> or the <code>.data</code>, never something in between. Before the rename, recovery deletes the unfinished <code>.tmp</code>. After it, recovery deletes the superseded inputs. There is no moment at which no valid copy exists.</li>
+        <li><b>Why the writer lock at the start.</b> Sealing the active file and reserving M must happen together, so that no write lands in a file that is about to become an input, and every later write gets an ID above M.</li>
+        <li><b>Why batches of 1024.</b> GET needs KeyDir's read lock. One write lock across a million updates would block all reads for tens of milliseconds and break the design doc's 5 ms rule. Short batches let reads slip in between.</li>
+        <li><b>When it runs.</b> A background check every 10 s starts it when the garbage ratio is at least 0.5 and the data is at least 16 MiB. The <code>COMPACT</code> command starts it right away. Only one runs at a time (<i>single-flight</i>); a second request gets <code>ErrCompactionRunning</code>.</li>
+        <li><b>If it fails.</b> Any error before the rename deletes the <code>.tmp</code>. Nothing else changes, and the engine stays writable.</li>
+      </ul>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"Does compaction stop clients?"</p>
+        <p>Only for very short moments: sealing and reserving the ID under the writer lock (microseconds), and each KeyDir batch (well under a millisecond each). Copying, the slow part, runs with no lock held.</p>
+      </div>
+    </section>
+
+    <!-- 09 ============================================================ -->
+    <section class="chapter" id="locks">
+      <div class="chapter-head"><span class="chapter-num">09</span><span class="ref">§6 Concurrency model</span><h2>Locks and goroutines</h2></div>
+      <p>A <b>goroutine</b> is a lightweight thread managed by the Go runtime. TinyCask runs one per client connection, so many PUTs and GETs happen at the same time. Shared data needs protection: if two goroutines write a Go map at the same time, the runtime stops the program with <code>fatal error: concurrent map writes</code>; if two goroutines append to a file without coordination, the order of records is unpredictable.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Lock</th><th>Type</th><th>Protects</th><th>Held during disk I/O?</th></tr></thead>
+        <tbody>
+          <tr><td><b>Writer lock</b></td><td><code>sync.Mutex</code> in engine</td><td>The append and its KeyDir update, rolls, switching to read-only</td><td>Yes, for the append itself</td></tr>
+          <tr><td><b>KeyDir lock</b></td><td><code>sync.RWMutex</code> in index</td><td>The map</td><td><b>Never</b></td></tr>
+          <tr><td><b>Store lock</b></td><td><code>sync.RWMutex</code> in storage</td><td>The set of open files (ID → file)</td><td>Read lock: yes, during pread. Write lock: only to change the set</td></tr>
+        </tbody>
+      </table></div>
+      <p>A <b>mutex</b> (mutual exclusion lock) lets one goroutine in at a time. A <b>read-write mutex</b> lets many readers in at once (<code>RLock</code>) or one writer alone (<code>Lock</code>). KeyDir uses the read-write kind because GETs vastly outnumber writes.</p>
+      <h3>Lock order</h3>
+      <div class="order"><span>writer lock</span><i>→</i><span>KeyDir lock</span><i>→</i><span>Store lock</span></div>
+      <p>A goroutine may take these locks only in this order, never backwards. The reason is <b>deadlock</b>:</p>
+      <figure class="fig">
+        <div class="fig-scroll">
+        <svg viewBox="0 0 600 230" role="img" aria-labelledby="f4t">
+          <title id="f4t">Deadlock: each goroutine holds one lock and waits for the other</title>
+          <defs><marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="svg-bad-fill"/></marker></defs>
+          <rect x="220" y="14" width="160" height="44" rx="8" class="svg-sunken"/><text x="300" y="41" text-anchor="middle" class="svg-t">writer lock</text>
+          <rect x="220" y="170" width="160" height="44" rx="8" class="svg-sunken"/><text x="300" y="197" text-anchor="middle" class="svg-t">KeyDir lock</text>
+          <rect x="30" y="92" width="130" height="44" rx="22" class="svg-box"/><text x="95" y="119" text-anchor="middle" class="svg-h">goroutine 1</text>
+          <rect x="440" y="92" width="130" height="44" rx="22" class="svg-box"/><text x="505" y="119" text-anchor="middle" class="svg-h">goroutine 2</text>
+          <path d="M220,192 C 140,192 100,170 96,140" class="svg-line"/><text x="120" y="184" class="svg-t2">holds</text>
+          <path d="M120,92 C 140,50 170,36 216,36" class="svg-bad svg-dash" marker-end="url(#ahb)"/><text x="128" y="52" class="svg-t2" fill="var(--bad)">waits for</text>
+          <path d="M380,36 C 460,36 500,60 504,88" class="svg-line"/><text x="440" y="44" class="svg-t2">holds</text>
+          <path d="M480,136 C 460,180 430,192 384,192" class="svg-bad svg-dash" marker-end="url(#ahb)"/><text x="440" y="186" class="svg-t2" fill="var(--bad)">waits for</text>
+        </svg>
+        </div>
+        <figcaption>Figure 4. Goroutine 1 took KeyDir first, goroutine 2 took the writer lock first. Each waits for the lock the other holds, forever. If everyone takes the writer lock before KeyDir, this circle cannot form.</figcaption>
+      </figure>
+      <h3>The other rules</h3>
+      <ul>
+        <li><b>No disk I/O while holding the KeyDir lock.</b> Disk operations take microseconds to milliseconds. Every GET needs this lock, so holding it during I/O would make all reads wait for the disk.</li>
+        <li><b>fsync outside the writer lock</b> (<code>sync=interval</code>). fsync can take milliseconds. The background goroutine takes a reference to the active file under the lock, releases it, then calls fsync, so writers are not stalled.</li>
+        <li><b>Close a file only after removing it from the Store.</b> Removal needs the Store's write lock, which waits until every reader holding the read lock has finished its pread. After removal no new reader can find the file, so closing it is safe.</li>
+        <li><b>Every goroutine has an owner.</b> The accept loop, one goroutine per connection, the fsync ticker, the compaction ticker: each is tied to a <code>context.Context</code> for cancellation and a <code>sync.WaitGroup</code> to wait for it. <code>Close</code> cancels and waits. A goroutine nobody stops is a leak, and it might write to a file that is already closed.</li>
+        <li><b>Flags and counters use <code>sync/atomic</code>.</b> <code>closed</code>, <code>readOnly</code>, "compaction running", liveBytes, diskBytes: single values read often, changed rarely.</li>
+      </ul>
+      <h3>Data race vs race condition</h3>
+      <p>A <b>data race</b> is two goroutines touching the same memory at the same time without synchronization, where at least one writes. <code>go test -race</code> finds these. A <b>race condition</b> is a wrong result caused by timing, even when every access is properly locked. The lost-update bug from chapter 6 (two locks) is a race condition with no data race: the race detector would stay silent. That is why the project also has invariant checks and a model test.</p>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"Why not one big lock around everything? Simpler."</p>
+        <p>Then every GET would wait behind every disk write and every fsync, and reads could never run in parallel. With the read-write KeyDir lock and lock-free pread, any number of GETs run at the same time, and writers block readers only for the instant of a map update.</p>
+      </div>
+    </section>
+
+    <!-- 10 ============================================================ -->
+    <section class="chapter" id="durability">
+      <div class="chapter-head"><span class="chapter-num">10</span><span class="ref">§7 Durability</span><h2>Durability and fsync</h2></div>
+      <p><b>Durability</b> is the promise that data the client was told is saved stays saved. To understand it you need the layers your bytes pass through:</p>
+      <div class="layers">
+        <div class="layer"><div><h4>Your program's memory</h4><p>A <code>[]byte</code> in the Go heap, or in a <code>bufio.Writer</code> buffer.</p></div><div class="badges"><span class="pill bad">lost on kill -9</span><span class="pill bad">lost on power cut</span></div></div>
+        <div class="hop"><code>write()</code> system call: returns as soon as the kernel has copied the bytes</div>
+        <div class="layer"><div><h4>Kernel page cache</h4><p>RAM owned by the operating system. The kernel writes it to disk later, on its own schedule.</p></div><div class="badges"><span class="pill good">survives kill -9</span><span class="pill bad">lost on power cut</span></div></div>
+        <div class="hop"><code>fsync()</code>: waits until the device confirms the data is stored</div>
+        <div class="layer"><div><h4>The disk (SSD or HDD)</h4><p>fsync also asks the drive to flush its own small cache.</p></div><div class="badges"><span class="pill good">survives kill -9</span><span class="pill good">survives power cut</span></div></div>
+      </div>
+      <p>This is why TinyCask writes every record with one unbuffered <code>Write</code> call: the moment the client gets OK, the record is at least in the page cache and survives a crash of the process. If records were collected in a Go buffer first, an acknowledged write could die with the process.</p>
+      <p>fsync is slow, from tens of microseconds to many milliseconds. On macOS, Go's <code>File.Sync</code> uses <code>F_FULLFSYNC</code>, which also empties the drive's cache. That is the honest kind of fsync, and on a laptop it limits you to a few hundred or a few thousand per second. That is why <code>sync=always</code> cannot reach the design doc's 12,000 writes per second.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>sync mode</th><th>When fsync happens</th><th>After kill -9</th><th>After a power cut</th></tr></thead>
+        <tbody>
+          <tr><td><code>always</code></td><td>After every write, before OK</td><td>Nothing lost</td><td>Nothing lost</td></tr>
+          <tr><td><code>interval</code> (default, 1 s)</td><td>A background timer</td><td>Nothing lost</td><td>Up to about 1 s of writes</td></tr>
+          <tr><td><code>never</code></td><td>Roll, compaction, Close</td><td>Nothing lost</td><td>Whatever the OS had not flushed</td></tr>
+        </tbody>
+      </table></div>
+      <p><b>RPO</b> (recovery point objective) is how much acknowledged data you may lose. The design doc: RPO = 0 for a process crash in every mode; RPO = 0 for a power cut only with <code>sync=always</code>. Redis makes the same default choice as TinyCask (<code>appendfsync everysec</code>).</p>
+      <h3>Why the directory is fsynced too</h3>
+      <p>A file's name lives in its directory, and a directory is a file too. Creating, renaming or deleting a file changes the directory. Until the directory itself is fsynced, a power cut can forget that a new file exists or bring back a deleted one. So the engine calls <code>SyncDir</code> after every create, rename and delete.</p>
+      <h3>Why a failed fsync is never retried</h3>
+      <p>In 2018 PostgreSQL developers found that on Linux, after fsync reports an error, the kernel may drop the unwritten pages and mark them clean. A second fsync then reports success although the data never reached the disk. This became known as "fsyncgate". Retrying is therefore a lie. PostgreSQL's fix was to stop instead of retrying. TinyCask stops writing (read-only mode) and keeps serving reads.</p>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"Why is the default allowed to lose a second of data?"</p>
+        <p>It is a speed-for-safety trade made explicitly and configurable. fsync on every write would cap throughput at what the drive can flush. Most workloads accept losing a second on a power cut; those that cannot set <code>sync=always</code>. A process crash loses nothing in any mode.</p>
+      </div>
+    </section>
+
+    <!-- 11 ============================================================ -->
+    <section class="chapter" id="errors">
+      <div class="chapter-head"><span class="chapter-num">11</span><span class="ref">§8 Error handling</span><h2>Errors</h2></div>
+      <p>In Go an error is a normal return value, not an exception. A function that can fail returns <code>error</code> as its last result, and the caller decides what to do. TinyCask's rules:</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Error</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>ErrKeyNotFound</code></td><td>GET or DELETE of a key that does not exist</td></tr>
+          <tr><td><code>ErrInvalidKey</code>, <code>ErrKeyTooLarge</code>, <code>ErrValueTooLarge</code></td><td>The request breaks the size limits</td></tr>
+          <tr><td><code>ErrNoSpace</code></td><td>The disk is full; the write was rolled back</td></tr>
+          <tr><td><code>ErrReadOnly</code></td><td>An earlier fsync or truncate failed; writes are refused until restart</td></tr>
+          <tr><td><code>ErrClosed</code></td><td>The engine was closed</td></tr>
+          <tr><td><code>ErrCorrupt</code></td><td>A record failed its checks</td></tr>
+          <tr><td><code>ErrLocked</code></td><td>Another process holds the directory</td></tr>
+          <tr><td><code>ErrCompactionRunning</code></td><td>A compaction is already in progress</td></tr>
+        </tbody>
+      </table></div>
+      <ul>
+        <li><b>Sentinel errors</b> are package-level values like <code>var ErrKeyNotFound = errors.New("engine: key not found")</code>. Callers compare with <code>errors.Is(err, engine.ErrKeyNotFound)</code>.</li>
+        <li><b>Wrapping</b> adds context without losing the original: <code>fmt.Errorf("open %s: %w", name, err)</code>. The message grows ("open seg_0000000003.data: write: no space left on device") and <code>errors.Is</code> still finds the original inside.</li>
+        <li><b>Each layer has its own errors</b> (<code>vfs.ErrNoSpace</code>, <code>storage.ErrCorrupt</code>, <code>storage.ErrSegmentNotFound</code>), and the engine translates them at its boundary. The server only needs to know the engine's errors.</li>
+        <li><b>Never compare error text.</b> Messages change and wrapping changes them; <code>errors.Is</code> checks identity through the whole chain.</li>
+        <li><b>No panic on bad input.</b> Bytes from disk and from the network are input. A panic on bad input turns one corrupt file or one hostile client into a dead server. <code>panic</code> is only for "this cannot happen" programmer bugs.</li>
+        <li><b>Log once</b>, at the place that handles the error, not at every level it passes through.</li>
+        <li><b>Read-only is one-way.</b> Within one process the engine never becomes writable again. Only a restart, which runs recovery, can establish what is really on disk.</li>
+      </ul>
+    </section>
+
+    <!-- 12 ============================================================ -->
+    <section class="chapter" id="protocol">
+      <div class="chapter-head"><span class="chapter-num">12</span><span class="ref">§9 Wire protocol</span><h2>The network protocol</h2></div>
+      <p>Clients talk to TinyCask over TCP, port 6380, using a subset of <b>RESP2</b>, the protocol Redis uses. That is why the standard <code>redis-cli</code> and <code>redis-benchmark</code> tools work as TinyCask's client and load generator without writing either.</p>
+      <div class="resp" aria-label="RESP encoding of SET user data"><span class="r-arr">*3</span><span class="r-crlf">\r\n</span><span class="r-len">$3</span><span class="r-crlf">\r\n</span><span class="r-dat">SET</span><span class="r-crlf">\r\n</span><span class="r-len">$4</span><span class="r-crlf">\r\n</span><span class="r-dat">user</span><span class="r-crlf">\r\n</span><span class="r-len">$4</span><span class="r-crlf">\r\n</span><span class="r-dat">data</span><span class="r-crlf">\r\n</span></div>
+      <div class="legend-inline"><span style="--c: color-mix(in srgb, var(--k4) 40%, transparent)"><code>*3</code> an array of 3 elements</span><span style="--c: color-mix(in srgb, var(--k1) 40%, transparent)"><code>$4</code> a bulk string of 4 bytes</span><span style="--c: color-mix(in srgb, var(--k2) 40%, transparent)">the bytes themselves</span><span style="--c: var(--sunken)"><code>\r\n</code> line end</span></div>
+      <p>Because every bulk string starts with its length, the value can contain any bytes: spaces, line breaks, zero bytes. The parser reads exactly that many. This property is called <b>binary-safe</b>. For typing by hand in <code>nc</code> or <code>telnet</code> there is also the <b>inline</b> form, <code>SET user data\r\n</code>, which cannot contain spaces inside a key or value.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Command</th><th>Reply</th><th>RESP type</th></tr></thead>
+        <tbody>
+          <tr><td><code>PING</code></td><td><code>+PONG</code></td><td>simple string</td></tr>
+          <tr><td><code>SET k v</code> / <code>PUT k v</code></td><td><code>+OK</code></td><td>simple string</td></tr>
+          <tr><td><code>GET k</code></td><td><code>$4\r\ndata</code>, or <code>$-1</code> if absent</td><td>bulk string / nil</td></tr>
+          <tr><td><code>DEL k</code> / <code>DELETE k</code></td><td><code>:1</code> deleted, <code>:0</code> absent</td><td>integer</td></tr>
+          <tr><td><code>COMPACT</code></td><td><code>+OK</code> when the merge finishes</td><td>simple string</td></tr>
+          <tr><td><code>INFO</code></td><td><code>keys:…</code> lines</td><td>bulk string</td></tr>
+          <tr><td>any failure</td><td><code>-ERR no_space …</code></td><td>error</td></tr>
+        </tbody>
+      </table></div>
+      <ul>
+        <li><b>Limits before allocation.</b> A client could send <code>$999999999999</code>. The parser checks every length against the limits (line ≤ 64 KiB, ≤ 8 elements, bulk ≤ the max value size) before it allocates or reads anything. <code>FuzzParseFrame</code> tests this with millions of random inputs.</li>
+        <li><b>Pipelining.</b> A client may send 100 commands without waiting for answers. The server reads them one by one, writes replies into a buffer, and sends the buffer when no more input is waiting: one network round trip instead of 100.</li>
+        <li><b>Connections.</b> One goroutine per connection. At most 1024 connections; extra ones are closed at once. An idle connection is closed after 5 minutes; a reply that cannot be written in 10 seconds closes the connection.</li>
+        <li><b>Shutdown.</b> On Ctrl+C (SIGINT) or SIGTERM: stop accepting, let running commands finish for up to 5 s, then close the engine. This is a <b>graceful shutdown</b>.</li>
+        <li><b>Errors on the wire.</b> Engine errors map to short codes (<code>no_space</code>, <code>read_only</code>, <code>invalid_argument</code>, <code>corrupt</code>, <code>busy</code>). Anything unexpected becomes <code>internal</code>; details go to the log, never to the client.</li>
+      </ul>
+      <div class="why"><span class="tag">Why this way</span>
+        <p class="q">"Why not HTTP with JSON?"</p>
+        <p>More parsing, no binary values without base64, and we would have to write our own client and benchmark tool. RESP is tiny to parse, binary-safe, and comes with mature tools. The design doc's text form <code>&lt;COMMAND&gt; &lt;KEY&gt; [&lt;VALUE&gt;]\r\n</code> still works as RESP's inline form.</p>
+      </div>
+    </section>
+
+    <!-- 13 ============================================================ -->
+    <section class="chapter" id="packages">
+      <div class="chapter-head"><span class="chapter-num">13</span><span class="ref">§2, §10, §12</span><h2>Packages and layers</h2></div>
+      <p>A Go <b>package</b> is a directory of <code>.go</code> files compiled together. Packages under <code>internal/</code> can only be imported by code in the same module, so nothing outside TinyCask can depend on them and you can change them freely.</p>
+      <figure class="fig">
+        <div class="fig-scroll">
+        <svg viewBox="0 0 720 480" role="img" aria-labelledby="f5t">
+          <title id="f5t">Package import graph: arrows point from importer to imported package</title>
+          <defs><marker id="ahp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--ink-3)"/></marker></defs>
+          <g class="pk">
+            <rect x="285" y="12" width="150" height="38" rx="7" class="svg-box"/><text x="360" y="36" text-anchor="middle" class="svg-t">cmd/tinycask</text>
+            <rect x="125" y="92" width="150" height="38" rx="7" class="svg-box"/><text x="200" y="116" text-anchor="middle" class="svg-t">server</text>
+            <rect x="285" y="172" width="150" height="38" rx="7" class="svg-box" style="stroke: var(--accent)"/><text x="360" y="196" text-anchor="middle" class="svg-t">engine</text>
+            <rect x="155" y="252" width="150" height="38" rx="7" class="svg-box"/><text x="230" y="276" text-anchor="middle" class="svg-t">compactor</text>
+            <rect x="35" y="332" width="150" height="38" rx="7" class="svg-box"/><text x="110" y="356" text-anchor="middle" class="svg-t">index</text>
+            <rect x="285" y="332" width="150" height="38" rx="7" class="svg-box"/><text x="360" y="356" text-anchor="middle" class="svg-t">storage</text>
+            <rect x="285" y="420" width="150" height="38" rx="7" class="svg-box"/><text x="360" y="444" text-anchor="middle" class="svg-t">vfs</text>
+            <rect x="60" y="420" width="150" height="38" rx="7" class="svg-sunken" style="stroke-dasharray: 5 4"/><text x="135" y="444" text-anchor="middle" class="svg-t2">vfs/simfs</text>
+          </g>
+          <path d="M320,50 L232,90" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M360,50 L360,170" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M435,31 H660 V439 H439" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M240,130 L320,170" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M330,210 L260,250" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M300,210 C 200,240 140,290 115,330" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M360,210 L360,330" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M435,191 H600 V430 H439" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M200,290 L140,330" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M280,290 L330,330" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M360,370 L360,418" class="svg-line" marker-end="url(#ahp)"/>
+          <path d="M210,439 L283,439" class="svg-line svg-dash" marker-end="url(#ahp)"/>
+          <text x="610" y="320" class="svg-cap" transform="rotate(90 610 320)">engine → vfs</text>
+          <text x="670" y="250" class="svg-cap" transform="rotate(90 670 250)">cmd → vfs (OSFS)</text>
+          <text x="60" y="472" class="svg-cap">TESTS ONLY</text>
+        </svg>
+        </div>
+        <figcaption>Figure 5. Imports only point downward. <code>server</code> cannot see storage, index, compactor or vfs. <code>simfs</code> is imported only by test files.</figcaption>
+      </figure>
+      <ul>
+        <li><b>Why one direction only.</b> Go refuses to compile import cycles. A one-way graph also means each layer can be tested alone: index without any disk, storage on a fake disk, the server with a fake engine.</li>
+        <li><b>Why vfs and index import nothing.</b> They are the foundations. index is a pure data structure, so its concurrency tests are simple and fast.</li>
+        <li><b>Why the server sees so little.</b> It only knows the engine's error values and stats, and talks to the store through a small interface it defines itself. Its tests use a fake store, with no disk involved.</li>
+        <li><b>Enforced, not hoped for.</b> The linter rule <code>depguard</code> (inside golangci-lint) fails the build if code outside <code>vfs</code> imports <code>os</code> file functions or if non-test code imports <code>simfs</code>.</li>
+      </ul>
+      <h3>The engine's public API</h3>
+      <pre><code class="go">func Open(fsys vfs.FS, dir string, opts Options) (*Engine, error)
+func (e *Engine) Put(key, value []byte) error
+func (e *Engine) Get(key []byte) ([]byte, error)
+func (e *Engine) Delete(key []byte) error
+func (e *Engine) Compact(ctx context.Context) error
+func (e *Engine) Stats() Stats
+func (e *Engine) Close() error</code></pre>
+      <p>Every method is safe to call from many goroutines at once. <code>Get</code> returns a slice the caller owns. The engine never keeps the caller's <code>key</code> or <code>value</code> slices after returning, because the caller may reuse them.</p>
+      <h3>Configuration</h3>
+      <p>Everything is a command-line flag: <code>-addr :6380</code>, <code>-dir ./data</code>, <code>-sync interval</code>, <code>-sync-interval 1s</code>, <code>-max-segment-size 64MiB</code>, <code>-max-key-size 1KiB</code>, <code>-max-value-size 1MiB</code>, <code>-compact-ratio 0.5</code>, <code>-compact-min-bytes 16MiB</code>, <code>-compact-interval 10s</code> (0 turns it off), <code>-max-conns 1024</code>. Tests shrink the sizes, for example 4 KiB segments, to exercise rolls and merges quickly.</p>
+    </section>
+
+    <!-- 14 ============================================================ -->
+    <section class="chapter" id="vfs">
+      <div class="chapter-head"><span class="chapter-num">14</span><span class="ref">§11 VFS contract</span><h2>The fake disk: VFS and SimFS</h2></div>
+      <p>Every disk operation in TinyCask goes through two small interfaces, <code>vfs.FS</code> and <code>vfs.File</code>. <b>VFS</b> stands for virtual file system. In production they are implemented by <code>OSFS</code>, which uses real files. In tests, by <code>SimFS</code>: a file system that lives in memory and fails on command.</p>
+      <pre><code class="go">type FS interface {
+    Create(name string) (File, error)     // new file, fails if it exists
+    Open(name string) (File, error)       // existing file
+    Remove(name string) error
+    Rename(oldName, newName string) error // atomic replace
+    List(dir string) ([]string, error)    // sorted names
+    MkdirAll(dir string) error
+    SyncDir(dir string) error
+    Lock(name string) (io.Closer, error)  // exclusive, ErrLocked if held
+}
+
+type File interface {
+    io.Writer   // always appends
+    io.ReaderAt // pread
+    io.Closer
+    Sync() error
+    Truncate(size int64) error
+    Size() (int64, error)
+}</code></pre>
+      <p>Why bother? Crash bugs are about what happens when a write fails halfway or the power goes off at the worst possible moment. You cannot make a real disk do that on cue, reliably, 2,000 times in one test run. SimFS can, and it is <b>deterministic</b>: a failing test fails the same way every time, so you can debug it.</p>
+      <h3>The four faults</h3>
+      <ol>
+        <li><b>Fail the Nth call</b> of an operation with a chosen error. Example: the 3rd Sync fails.</li>
+        <li><b>Tear a write at byte N, then crash.</b> Part of a record reaches the "disk", then the process is dead.</li>
+        <li><b>Disk quota.</b> A write that does not fit stores what fits and returns <code>ErrNoSpace</code>.</li>
+        <li><b>Lose unsynced bytes on restart.</b> Every file is cut back to what was last fsynced: a power cut.</li>
+      </ol>
+      <p>After a simulated crash, every call returns <code>ErrCrashed</code> until <code>Restart()</code>, and old file handles stay dead, exactly like after a real process death. One documented simplification: creating, renaming and deleting files is durable at once in SimFS. The engine still calls <code>SyncDir</code>, but SimFS cannot detect a missing call.</p>
+      <h3>Keeping the fake honest</h3>
+      <p>A <b>conformance suite</b> is one set of tests run against both OSFS and SimFS. If SimFS behaved differently from a real disk in any way the suite checks, it would fail. Otherwise a test could pass on the fake and the bug would still exist on real disks.</p>
+      <p>Every crash test follows the same shape: arm a fault, run until <code>ErrCrashed</code>, <code>Restart()</code>, reopen the engine, compare with the expected state, check the invariants.</p>
+    </section>
+
+    <!-- 15 ============================================================ -->
+    <section class="chapter" id="testing">
+      <div class="chapter-head"><span class="chapter-num">15</span><span class="ref">§13 Testing architecture</span><h2>Testing strategy</h2></div>
+      <div class="tbl"><table>
+        <thead><tr><th>Kind</th><th>What it proves</th><th>Example</th></tr></thead>
+        <tbody>
+          <tr><td><b>Unit</b></td><td>One piece works alone</td><td>Encode then decode returns the same record</td></tr>
+          <tr><td><b>Golden</b></td><td>The byte format never changes by accident</td><td>A committed file holds the exact bytes of a sample record</td></tr>
+          <tr><td><b>Conformance</b></td><td>The fake disk behaves like the real one</td><td>One suite for OSFS and SimFS</td></tr>
+          <tr><td><b>Integration</b></td><td>The pieces work together</td><td>Engine + storage + compactor on SimFS and on real files</td></tr>
+          <tr><td><b>Fault injection</b></td><td>Failures are handled</td><td>Torn write, full disk, crash after rename</td></tr>
+          <tr><td><b>Model test</b></td><td>No combination of operations and crashes breaks it</td><td>Random operations vs a plain Go map</td></tr>
+          <tr><td><b>Fuzz</b></td><td>Hostile input never panics or over-allocates</td><td><code>FuzzDecodeRecord</code>, <code>FuzzParseFrame</code></td></tr>
+          <tr><td><b>Race detector</b></td><td>No unsynchronized memory access</td><td>Every test runs with <code>-race</code></td></tr>
+          <tr><td><b>Benchmarks</b></td><td>How fast, reported, never asserted</td><td>P99 latency and ops/s per workload</td></tr>
+        </tbody>
+      </table></div>
+      <h3>The model test</h3>
+      <p>A generator, started from a <b>seed</b> (a number that fixes the random sequence), produces random PUTs, DELETEs, GETs and COMPACTs. They run against TinyCask and against a plain Go map, the <b>model</b>. At a random moment the fake disk crashes; the engine restarts and is compared with the model. Every acknowledged write must be there; the interrupted one is either fully there or absent. If it ever fails, rerunning with the same seed reproduces the exact failure. This one test covers combinations nobody would think to write by hand. The simulator on this page was checked the same way.</p>
+      <h3>Invariants</h3>
+      <p>An <b>invariant</b> is a statement that must be true at all times. The design doc's two: the number of keys in KeyDir equals the number of keys whose last record in the log is not a tombstone; and every KeyDir entry points at a record whose CRC is valid. A test helper checks both after every reopen by scanning the files on its own, without trusting KeyDir.</p>
+      <h3>Fuzzing</h3>
+      <p><code>go test -fuzz</code> feeds millions of mutated inputs into a function, guided by which code paths they reach, looking for panics. For the decoder and the parser the property is simple: never panic, never allocate absurdly, and decoding followed by encoding returns the same bytes. Any crashing input it finds is saved under <code>testdata/fuzz/</code> and becomes a permanent regression test.</p>
+      <h3>Benchmarks and P99</h3>
+      <p><b>Throughput</b> is operations per second. <b>P99 latency</b> is the time that 99% of requests beat; it shows the slow tail that an average hides. Timing assertions in tests are flaky on laptops and CI machines, so benchmarks report numbers and never fail a build. Results go into <code>BENCHMARKS.md</code> next to the design doc's targets, reported as measured.</p>
+      <p>Coverage targets: over 85% overall, at least 90% for storage, engine and compactor, and every fault point exercised by at least one test.</p>
+    </section>
+
+    <!-- 16 ============================================================ -->
+    <section class="chapter" id="scope">
+      <div class="chapter-head"><span class="chapter-num">16</span><span class="ref">§14 MVP · §15 Decision log</span><h2>Scope and decisions</h2></div>
+      <h3>Deliberately not built</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>Feature</th><th>What it is</th><th>Why not now</th></tr></thead>
+        <tbody>
+          <tr><td>Hint files</td><td>A small index file per segment so startup need not read all data</td><td>Optimisation only; startup is correct without it</td></tr>
+          <tr><td>Group commit</td><td>One fsync shared by many waiting writers</td><td>Big speed-up for <code>sync=always</code>, but complex concurrency</td></tr>
+          <tr><td>TTL, scans, multi-key commands, transactions</td><td>Expiry, range queries, atomic batches</td><td>Non-goals of the design doc; a hash index has no order</td></tr>
+          <tr><td>Replication</td><td>Copies on other machines</td><td>Strictly local by design</td></tr>
+          <tr><td>Compression, auth, TLS, metrics endpoint</td><td>Operational features</td><td>Not needed to show the storage ideas</td></tr>
+          <tr><td>Windows, own load generator</td><td></td><td>macOS and Linux only; <code>redis-benchmark</code> already exists</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Known limitations, accepted for v1</h3>
+      <ul>
+        <li>Startup time grows with the total data size.</li>
+        <li><code>sync=always</code> throughput is limited by the drive's fsync speed.</li>
+        <li>Compaction needs free disk space equal to the live data, plus RAM for the pending list.</li>
+        <li>Corruption in a sealed file stops the database from opening. There is no salvage mode.</li>
+      </ul>
+      <h3>The decision log in plain words</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>Chosen</th><th>Rejected</th><th>Because</th></tr></thead>
+        <tbody>
+          <tr><td>One writer lock for append + KeyDir update</td><td>Separate locks</td><td>Separate locks let KeyDir and the log disagree about write order</td></tr>
+          <tr><td>Output ID reserved between inputs and new writes</td><td>Reuse the highest input ID</td><td>Two files with one ID would be open at once, and replay order would break</td></tr>
+          <tr><td>Output supersedes all lower IDs</td><td>A manifest file</td><td>One naming rule gives crash-safe cleanup with no extra file to keep consistent</td></tr>
+          <tr><td>Explicit Type byte</td><td>Value size 0 as tombstone</td><td>Empty values must be storable</td></tr>
+          <tr><td>Fail-stop on corruption in old files</td><td>Skip the bad record</td><td>Lengths in a corrupt header can't be trusted, so finding the next record is guesswork</td></tr>
+          <tr><td>RESP2 subset + inline text</td><td>Custom binary protocol</td><td>Binary-safe, and redis-cli and redis-benchmark work unchanged</td></tr>
+          <tr><td>Keep the design doc's KeyDir struct</td><td>Store record offset and size</td><td>Both are derivable; no change to the approved model</td></tr>
+          <tr><td>Retry GET when a file vanished</td><td>Hold a lock across lookup and read</td><td>Keeps disk reads out of the index lock</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <!-- 17 ============================================================ -->
+    <section class="chapter" id="go">
+      <div class="chapter-head"><span class="chapter-num">17</span><span class="ref">Go primer</span><h2>Go idioms in the code</h2></div>
+      <p class="kicker">Only the parts of Go TinyCask uses, each with the reason it matters here. The longer snippets were compiled and run with Go 1.27 while this guide was written.</p>
+      <h3>Modules, packages and exported names</h3>
+      <p>A <b>module</b> is the whole project, defined by <code>go.mod</code> (<code>module github.com/…/TinyCask</code>, <code>go 1.27</code>). A <b>package</b> is one directory. A name starting with a capital letter (<code>Engine</code>, <code>Open</code>) is <b>exported</b>, visible to other packages; a lowercase name (<code>appendFrame</code>) is private to its package. There is no <code>public</code> keyword: capitalisation is the rule.</p>
+      <h3>Structs, methods, pointer receivers</h3>
+      <pre><code class="go">type Engine struct {
+    mu       sync.Mutex  // writer lock: guards the active file and the KeyDir update
+    readOnly atomic.Bool
+    wg       sync.WaitGroup
+}
+
+// Pointer receiver (*Engine): the method works on the shared Engine, not a copy.
+func (e *Engine) Put(key, value []byte) error {
+    frame := encode(key, value) // outside the lock
+    e.mu.Lock()
+    defer e.mu.Unlock()
+    // append, then update KeyDir ...
+    return nil
+}</code></pre>
+      <p>Types that contain a mutex must always be used through a pointer. Copying a struct copies its mutex, including whether it is locked, and <code>go vet</code> warns about it (the "copylocks" check).</p>
+      <h3>Interfaces are satisfied implicitly</h3>
+      <pre><code class="go">type File interface {
+    Write(p []byte) (int, error)
+    Sync() error
+}
+
+type memFile struct{ data []byte }
+
+func (m *memFile) Write(p []byte) (int, error) { m.data = append(m.data, p...); return len(p), nil }
+func (m *memFile) Sync() error                 { return nil }
+
+var _ File = (*memFile)(nil) // compile-time proof that *memFile is a File</code></pre>
+      <p>There is no <code>implements</code> keyword. Any type with the right methods is a <code>File</code>. That is how <code>OSFS</code> and <code>SimFS</code> both become a <code>vfs.FS</code>, and how the engine can run on either without knowing which. The last line is a common trick: it fails to compile if <code>memFile</code> ever stops matching the interface.</p>
+      <h3>Errors: sentinels, wrapping, Is, Join</h3>
+      <pre><code class="go">var ErrKeyNotFound = errors.New("engine: key not found")
+
+func lookup(key string) error {
+    return fmt.Errorf("get %q: %w", key, ErrKeyNotFound) // %w wraps
+}
+
+err := lookup("user")
+fmt.Println(err)                            // get "user": engine: key not found
+fmt.Println(errors.Is(err, ErrKeyNotFound)) // true
+
+// Two failures at once (a failed write, then a failed cleanup):
+return errors.Join(writeErr, truncErr)</code></pre>
+      <p><code>%w</code> keeps the original error inside the new one; <code>%v</code> would only copy its text and <code>errors.Is</code> would stop working. <code>errors.As</code> is the variant that extracts an error of a specific type.</p>
+      <h3>defer</h3>
+      <p><code>defer f()</code> runs <code>f</code> when the surrounding function returns, whichever way it returns. It is the standard way to unlock a mutex or close a file. Two traps: a defer inside a loop only runs when the whole function ends, and a deferred <code>Close()</code> silently drops its error. For files that were written, check it:</p>
+      <pre><code class="go">func writeAll(f vfs.File, b []byte) (err error) {
+    defer func() {
+        if cerr := f.Close(); cerr != nil &amp;&amp; err == nil {
+            err = cerr // report the Close error if nothing else failed
+        }
+    }()
+    _, err = f.Write(b)
+    return err
+}</code></pre>
+      <h3>Slices share memory</h3>
+      <pre><code class="go">buf := []byte("user")
+m := map[string][]byte{}
+m["k"] = buf      // stores the same underlying array, not a copy
+buf[0] = 'X'
+fmt.Println(string(m["k"])) // Xser  (the stored value changed!)
+
+safe := bytes.Clone(buf)    // an independent copy
+
+idx := map[string]int{}
+idx[string(buf)] = 1        // string(buf) copies, so the map key is safe</code></pre>
+      <p>A slice is a small header pointing at an array. Assigning a slice copies the header, not the data. This is why the engine copies values it returns and never keeps the caller's slices, and why KeyDir uses <code>map[string]</code>.</p>
+      <h3>Maps are not safe for concurrent use</h3>
+      <p>A Go map read and written by two goroutines at once crashes the program (or worse, corrupts silently under the race detector's radar). Every shared map needs a mutex; KeyDir's is a <code>sync.RWMutex</code>.</p>
+      <h3>Goroutines, channels, select, context, WaitGroup</h3>
+      <pre><code class="go">func (e *Engine) startSyncLoop(ctx context.Context, every time.Duration) {
+    e.wg.Go(func() { // starts a goroutine and counts it in the WaitGroup
+        t := time.NewTicker(every)
+        defer t.Stop()
+        for {
+            select {
+            case &lt;-ctx.Done(): // Close cancelled the context
+                return
+            case &lt;-t.C: // the ticker fired
+                if err := e.syncActive(); err != nil {
+                    e.log.Error("background sync failed", "err", err)
+                }
+            }
+        }
+    })
+}
+
+// In Close():
+cancel()     // tell every background goroutine to stop
+e.wg.Wait()  // and wait until they all have</code></pre>
+      <ul>
+        <li><code>go f()</code> starts a goroutine. <code>wg.Go(f)</code> (Go 1.25+) does the same and registers it with the WaitGroup.</li>
+        <li>A <b>channel</b> passes values between goroutines; <code>&lt;-ch</code> waits for one. <code>select</code> waits on several channels and runs the case that is ready first.</li>
+        <li>A <b>context</b> carries a cancellation signal. <code>ctx.Done()</code> is a channel that closes when someone calls <code>cancel()</code>.</li>
+        <li>A <b>WaitGroup</b> counts running goroutines; <code>Wait()</code> blocks until the count is zero.</li>
+      </ul>
+      <h3>sync and sync/atomic</h3>
+      <p><code>sync.Mutex</code>: <code>Lock</code>/<code>Unlock</code>. <code>sync.RWMutex</code>: <code>RLock</code>/<code>RUnlock</code> for readers, <code>Lock</code>/<code>Unlock</code> for the writer. <code>atomic.Bool</code> and <code>atomic.Int64</code> are single values that many goroutines can <code>Load</code> and <code>Store</code> safely without a mutex, which suits flags like <code>readOnly</code> and counters like liveBytes.</p>
+      <h3>io interfaces and bufio</h3>
+      <p><code>io.Writer</code> (<code>Write(p) (n, err)</code>), <code>io.ReaderAt</code> (<code>ReadAt(p, off) (n, err)</code>) and <code>io.Closer</code> are tiny standard interfaces that <code>vfs.File</code> combines. <code>bufio.Reader</code> wraps a network connection so the RESP parser can read line by line; <code>io.ReadFull</code> reads exactly N bytes for a bulk string or fails. Remember: <code>ReadAt</code> returns <code>io.EOF</code> when fewer bytes exist than asked for, which is how a scanner notices a short record.</p>
+      <h3>encoding/binary and hash/crc32</h3>
+      <pre><code class="go">buf := make([]byte, 21+len(key)+len(value))
+binary.LittleEndian.PutUint64(buf[4:12], uint64(ts))
+buf[12] = 1 // PUT
+binary.LittleEndian.PutUint32(buf[13:17], uint32(len(key)))
+binary.LittleEndian.PutUint32(buf[17:21], uint32(len(value)))
+copy(buf[21:], key)
+copy(buf[21+len(key):], value)
+binary.LittleEndian.PutUint32(buf[0:4], crc32.ChecksumIEEE(buf[4:]))</code></pre>
+      <p>This is the whole encoder; the bytes in chapter 3's encoder were checked against exactly this code. <code>buf[4:12]</code> is a sub-slice from byte 4 up to (not including) byte 12.</p>
+      <h3>Tests</h3>
+      <pre><code class="go">func TestDecode_Rejects(t *testing.T) {
+    tests := []struct {
+        name string
+        in   []byte
+    }{
+        {"short header", sample[:20]},
+        {"short payload", sample[:25]},
+        {"flipped CRC bit", flip(sample, 0)},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            _, err := storage.Decode(tt.in, storage.DefaultLimits)
+            require.ErrorIs(t, err, storage.ErrCorrupt)
+        })
+    }
+}
+
+func FuzzDecodeRecord(f *testing.F) {
+    f.Add(sample) // a starting input
+    f.Fuzz(func(t *testing.T, data []byte) {
+        rec, err := storage.Decode(data, storage.DefaultLimits)
+        if err != nil {
+            return // rejecting is fine; panicking is not
+        }
+        require.Equal(t, data[:rec.Size()], storage.Encode(rec))
+    })
+}</code></pre>
+      <ul>
+        <li>Test files end in <code>_test.go</code>; test functions start with <code>Test</code>, fuzz targets with <code>Fuzz</code>, benchmarks with <code>Benchmark</code>.</li>
+        <li><b>Table-driven tests</b> list cases in a slice and run each with <code>t.Run</code>, so each case has a name in the output.</li>
+        <li>testify's <code>require</code> stops the test on failure; <code>assert</code> records the failure and continues.</li>
+        <li><code>t.TempDir()</code> gives a directory deleted after the test; <code>t.Cleanup(f)</code> registers cleanup; <code>t.Helper()</code> makes failures point at the caller.</li>
+        <li>Useful flags: <code>-race</code>, <code>-count=1</code> (no cached results), <code>-run 'Name'</code>, <code>-fuzz Name -fuzztime 30s</code>, <code>-bench .</code>.</li>
+      </ul>
+      <h3>Build tags and tools</h3>
+      <p>A first line <code>//go:build unix</code> compiles a file only on Unix systems; TinyCask uses it for the <code>flock</code> code. <code>gofmt</code> formats code (a hook runs it after every edit), <code>go vet</code> finds suspicious code, and <code>golangci-lint</code> runs many more checks, including the depguard import rules.</p>
+    </section>
+
+    <!-- 18 ============================================================ -->
+    <section class="chapter" id="glossary">
+      <div class="chapter-head"><span class="chapter-num">18</span><span class="ref">Every term in ARCHITECTURE.md</span><h2>Glossary</h2></div>
+      <p>Every term used on this page and in the architecture document, with a link to the chapter that explains it.</p>
+      <div class="search"><input id="gloss-q" type="search" placeholder="Filter terms, e.g. fsync" aria-label="Filter glossary"><small id="gloss-n"></small></div>
+      <dl class="gloss" id="gloss"></dl>
+    </section>
+
+      <p class="foot">Source: J. Sheehy and D. Smith, "Bitcask: A Log-Structured Hash Table for Fast Key/Value Data", Basho Technologies, 2010. The record bytes shown on this page match bytes produced by Go code byte for byte, and the simulator's logic is checked by automated tests, including randomized runs with crashes and compaction.</p>
+  </main>
+</div>
+
+<script>/* TinyCask teaching core: the v1 record codec and a single-threaded model of the engine.
+   No DOM here, so the same file runs in the browser and in the Node test suite. */
+(function (root) {
+  'use strict';
+
+  const HEADER = 21;
+  const TYPE_PUT = 1;
+  const TYPE_DEL = 2;
+  const te = new TextEncoder();
+  const td = new TextDecoder('utf-8');
+  const byteLen = (s) => te.encode(s).length;
+
+  // CRC-32 with the IEEE polynomial (reflected 0xEDB88320), the same as Go's crc32.ChecksumIEEE.
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+
+  function crc32(bytes) {
+    let c = 0xffffffff;
+    for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+
+  // Layout (ARCHITECTURE §3.1): CRC32 4 | Timestamp 8 | Type 1 | KeySize 4 | ValSize 4 | Key | Value
+  function encodeRecord(ts, type, key, value) {
+    const k = te.encode(key);
+    const v = te.encode(value);
+    const buf = new Uint8Array(HEADER + k.length + v.length);
+    const dv = new DataView(buf.buffer);
+    dv.setBigUint64(4, BigInt(ts), true);
+    buf[12] = type;
+    dv.setUint32(13, k.length, true);
+    dv.setUint32(17, v.length, true);
+    buf.set(k, HEADER);
+    buf.set(v, HEADER + k.length);
+    dv.setUint32(0, crc32(buf.subarray(4)), true);
+    return buf;
+  }
+
+  // Validates in the order the architecture prescribes: header, type, limits, payload length, CRC.
+  function decodeRecord(buf, limits) {
+    const lim = limits || { maxKey: 1024, maxValue: 1048576 };
+    if (buf.length < HEADER) {
+      return { ok: false, stage: 'header', reason: `only ${buf.length} bytes; a header needs ${HEADER}` };
+    }
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const base = {
+      storedCrc: dv.getUint32(0, true),
+      ts: dv.getBigUint64(4, true),
+      type: buf[12],
+      keySize: dv.getUint32(13, true),
+      valSize: dv.getUint32(17, true),
+    };
+    if (base.type !== TYPE_PUT && base.type !== TYPE_DEL) {
+      return { ...base, ok: false, stage: 'type', reason: `unknown record type ${base.type}` };
+    }
+    if (base.keySize < 1 || base.keySize > lim.maxKey) {
+      return { ...base, ok: false, stage: 'limits', reason: `key size ${base.keySize} is outside 1..${lim.maxKey}` };
+    }
+    if (base.valSize > lim.maxValue) {
+      return { ...base, ok: false, stage: 'limits', reason: `value size ${base.valSize} is over ${lim.maxValue}` };
+    }
+    if (base.type === TYPE_DEL && base.valSize !== 0) {
+      return { ...base, ok: false, stage: 'limits', reason: 'a tombstone must have value size 0' };
+    }
+    const total = HEADER + base.keySize + base.valSize;
+    if (buf.length < total) {
+      return { ...base, ok: false, stage: 'payload', reason: `the header promises ${total} bytes but only ${buf.length} exist` };
+    }
+    const computedCrc = crc32(buf.subarray(4, total));
+    if (computedCrc !== base.storedCrc) {
+      return { ...base, ok: false, stage: 'crc', computedCrc, reason: 'stored and computed checksums differ' };
+    }
+    return {
+      ...base,
+      ok: true,
+      computedCrc,
+      size: total,
+      key: td.decode(buf.subarray(HEADER, HEADER + base.keySize)),
+      value: td.decode(buf.subarray(HEADER + base.keySize, total)),
+    };
+  }
+
+  const SIM_LIMITS = { maxKey: 12, maxValue: 24 };
+
+  const ok = (msg, extra) => ({ ok: true, msg, ...extra });
+  const fail = (err, msg, extra) => ({ ok: false, err, msg, ...extra });
+
+  /* A model of the engine for teaching. It keeps the rules of ARCHITECTURE §3–§5:
+     append-only files, a KeyDir pointing at the newest record, roll at a size limit,
+     recovery with the supersede rule and tail truncation, and five-step compaction. */
+  class Sim {
+    constructor(opts) {
+      this.maxSeg = (opts && opts.maxSeg) || 128;
+      this.reset();
+    }
+
+    reset() {
+      this.files = new Map();
+      this.nextId = 1;
+      this.keydir = new Map();
+      this.status = 'running'; // running | crashed | failed
+      this.failure = null;
+      this.compaction = null;
+      this.activeId = this._newSegment();
+    }
+
+    _newSegment() {
+      const id = this.nextId++;
+      this.files.set(id, { id, kind: 'seg', records: [], sealed: false });
+      return id;
+    }
+
+    name(id) {
+      const f = this.files.get(id);
+      const kind = f ? f.kind : 'seg';
+      if (kind === 'compact') return `compact_${id}.data`;
+      if (kind === 'tmp') return `compact_${id}.tmp`;
+      return `seg_${id}.data`;
+    }
+
+    fileSize(f) {
+      let n = 0;
+      for (const r of f.records) n += r.size;
+      return n;
+    }
+
+    sortedFiles() {
+      return [...this.files.values()].sort((a, b) => a.id - b.id);
+    }
+
+    stats() {
+      let disk = 0;
+      for (const f of this.files.values()) if (f.kind !== 'tmp') disk += this.fileSize(f);
+      let live = 0;
+      for (const e of this.keydir.values()) live += e.size;
+      return {
+        keys: this.keydir.size,
+        files: [...this.files.values()].filter((f) => f.kind !== 'tmp').length,
+        diskBytes: disk,
+        liveBytes: live,
+        garbage: disk === 0 ? 0 : 1 - live / disk,
+      };
+    }
+
+    _guard() {
+      if (this.status === 'crashed') return fail('ErrDown', 'The process is not running. Press Restart to run recovery.');
+      if (this.status === 'failed') return fail('ErrCorrupt', 'Open failed with ErrCorrupt. Undo the bit flip, then Restart.');
+      return null;
+    }
+
+    _validate(key, value) {
+      if (byteLen(key) < 1) return fail('ErrInvalidKey', 'The key is empty. Keys need at least 1 byte.');
+      if (byteLen(key) > SIM_LIMITS.maxKey) return fail('ErrKeyTooLarge', `The key is over ${SIM_LIMITS.maxKey} bytes (the simulator's limit; the real one is 1 KiB).`);
+      if (byteLen(value) > SIM_LIMITS.maxValue) return fail('ErrValueTooLarge', `The value is over ${SIM_LIMITS.maxValue} bytes (the simulator's limit; the real one is 1 MiB).`);
+      return null;
+    }
+
+    _append(type, key, value) {
+      const size = HEADER + byteLen(key) + byteLen(value);
+      let active = this.files.get(this.activeId);
+      let rolled = null;
+      if (active.records.length > 0 && this.fileSize(active) + size > this.maxSeg) {
+        rolled = this.activeId;
+        active.sealed = true;
+        this.activeId = this._newSegment();
+        active = this.files.get(this.activeId);
+      }
+      const offset = this.fileSize(active);
+      active.records.push({ type, key, value, offset, size, torn: false, damaged: false });
+      return { fileId: this.activeId, offset, size, rolled };
+    }
+
+    _rollNote(w) {
+      return w.rolled ? ` ${this.name(w.rolled)} was full, so it was sealed and ${this.name(w.fileId)} became the active segment.` : '';
+    }
+
+    put(key, value) {
+      const bad = this._guard() || this._validate(key, value);
+      if (bad) return bad;
+      const prev = this.keydir.get(key);
+      const w = this._append(TYPE_PUT, key, value);
+      this.keydir.set(key, { fileId: w.fileId, offset: w.offset, size: w.size, valueSize: byteLen(value) });
+      const old = prev ? ` The previous version in ${this.name(prev.fileId)} at offset ${prev.offset} is now garbage.` : '';
+      return ok(`PUT ${key}=${value}: appended ${w.size} B to ${this.name(w.fileId)} at offset ${w.offset}, then KeyDir[${key}] = (file ${w.fileId}, offset ${w.offset}).${old}${this._rollNote(w)}`, w);
+    }
+
+    get(key) {
+      const bad = this._guard();
+      if (bad) return bad;
+      const e = this.keydir.get(key);
+      if (!e) return fail('ErrKeyNotFound', `GET ${key}: not in KeyDir, so the key does not exist. No disk read happened.`);
+      const f = this.files.get(e.fileId);
+      const rec = f && f.records.find((r) => r.offset === e.offset);
+      if (!rec) return fail('ErrSegmentNotFound', `GET ${key}: file ${e.fileId} is gone; the real engine retries the lookup.`);
+      if (rec.damaged || rec.torn || rec.key !== key) {
+        return fail('ErrCorrupt', `GET ${key}: read ${e.size} B from ${this.name(e.fileId)} at offset ${e.offset}, but the CRC does not match. Returned ErrCorrupt instead of wrong data.`);
+      }
+      return ok(`GET ${key}: KeyDir says (file ${e.fileId}, offset ${e.offset}). One pread of ${e.size} B, CRC matches, value "${rec.value}".`, { value: rec.value });
+    }
+
+    del(key) {
+      const bad = this._guard() || this._validate(key, '');
+      if (bad) return bad;
+      if (!this.keydir.has(key)) return fail('ErrKeyNotFound', `DELETE ${key}: the key does not exist, so nothing was written.`);
+      const prev = this.keydir.get(key);
+      const w = this._append(TYPE_DEL, key, '');
+      this.keydir.delete(key);
+      return ok(`DELETE ${key}: appended a ${w.size} B tombstone to ${this.name(w.fileId)} at offset ${w.offset} and removed ${key} from KeyDir. The old value in ${this.name(prev.fileId)} is garbage now, but it stays on disk until compaction.${this._rollNote(w)}`, w);
+    }
+
+    crash() {
+      if (this.status !== 'running') return fail('ErrDown', 'The process is already down.');
+      const inMerge = this.compaction ? ' The compaction in progress is lost too.' : '';
+      this.status = 'crashed';
+      this.keydir = new Map();
+      this.compaction = null;
+      return ok(`kill -9: the process died. Everything in RAM is gone, including KeyDir.${inMerge} The files stay exactly as they were.`);
+    }
+
+    tornPut(key, value) {
+      const bad = this._guard() || this._validate(key, value);
+      if (bad) return bad;
+      const w = this._append(TYPE_PUT, key, value);
+      const active = this.files.get(w.fileId);
+      const rec = active.records[active.records.length - 1];
+      rec.fullSize = rec.size;
+      rec.size = HEADER;
+      rec.torn = true;
+      this.status = 'crashed';
+      this.keydir = new Map();
+      this.compaction = null;
+      return ok(`Torn write: PUT ${key}=${value} needed ${rec.fullSize} B, but power failed after the ${HEADER}-byte header reached ${this.name(w.fileId)}. The client never got OK. The process is down.`);
+    }
+
+    damageOld() {
+      const files = this.sortedFiles().filter((f) => f.kind !== 'tmp');
+      const newest = files.length ? files[files.length - 1].id : 0;
+      for (const f of files) {
+        if (f.id === newest) continue;
+        const rec = f.records.find((r) => !r.damaged && !r.torn);
+        if (rec) {
+          rec.damaged = true;
+          return ok(`Bit rot: one bit flipped inside ${this.name(f.id)} at offset ${rec.offset} (${rec.type === TYPE_DEL ? 'tombstone for' : 'record'} ${rec.key}). Its CRC no longer matches.`);
+        }
+      }
+      return fail('ErrNothingToDamage', 'There is no older file yet. Write until the active segment rolls, then try again.');
+    }
+
+    repair() {
+      let n = 0;
+      for (const f of this.files.values()) {
+        for (const r of f.records) {
+          if (r.damaged) {
+            r.damaged = false;
+            n++;
+          }
+        }
+      }
+      if (n === 0) return fail('ErrNothingToRepair', 'No damaged records.');
+      if (this.status === 'failed') this.status = 'crashed';
+      this.failure = null;
+      return ok(`Restored ${n} damaged record${n > 1 ? 's' : ''} (think: copied back from a backup). Restart to open the database.`);
+    }
+
+    restart() {
+      const cleanup = [];
+      const repairs = [];
+      const clean = this.status === 'running';
+      this.keydir = new Map();
+      this.compaction = null;
+      this.failure = null;
+
+      for (const f of this.sortedFiles()) {
+        if (f.kind === 'tmp') {
+          cleanup.push(`deleted the unfinished ${this.name(f.id)}`);
+          this.files.delete(f.id);
+        }
+      }
+      const compacts = this.sortedFiles().filter((f) => f.kind === 'compact');
+      if (compacts.length) {
+        const M = compacts[compacts.length - 1].id;
+        for (const f of this.sortedFiles()) {
+          if (f.id < M) {
+            cleanup.push(`deleted ${this.name(f.id)} (superseded by compact_${M}.data)`);
+            this.files.delete(f.id);
+          }
+        }
+      }
+
+      const files = this.sortedFiles();
+      const maxId = files.length ? files[files.length - 1].id : 0;
+      let replayed = 0;
+      for (const f of files) {
+        for (let i = 0; i < f.records.length; i++) {
+          const r = f.records[i];
+          if (r.torn || r.damaged) {
+            if (f.id === maxId) {
+              const cut = f.records.slice(i).reduce((n, x) => n + x.size, 0);
+              f.records = f.records.slice(0, i);
+              repairs.push(`truncated ${cut} bad bytes at the end of ${this.name(f.id)} (offset ${r.offset}), the newest file`);
+              break;
+            }
+            this.status = 'failed';
+            this.failure = { fileId: f.id, offset: r.offset };
+            this.keydir = new Map();
+            return fail('ErrCorrupt', `Open failed: ErrCorrupt in ${this.name(f.id)} at offset ${r.offset}. This file is not the newest one, so the damage cannot be a half-finished write. Acknowledged data is broken, and the database refuses to open rather than silently lose it. Deleting or overwriting the key does not help: that only appends a new record, the damaged bytes stay where they are, and recovery must read past them. Press Undo bit rot (restore from a backup), then Restart.`);
+          }
+          replayed++;
+          if (r.type === TYPE_PUT) {
+            this.keydir.set(r.key, { fileId: f.id, offset: r.offset, size: r.size, valueSize: byteLen(r.value) });
+          } else {
+            this.keydir.delete(r.key);
+          }
+        }
+      }
+      for (const f of files) f.sealed = true;
+      this.nextId = maxId + 1;
+      this.activeId = this._newSegment();
+      this.status = 'running';
+      const how = clean ? 'Clean restart' : 'Recovery';
+      const first = cleanup.length ? `first ${cleanup.join('; ')}; then ` : '';
+      const fixed = repairs.length ? ` While replaying it ${repairs.join('; ')}.` : '';
+      return ok(`${how}: ${first}replayed ${replayed} record${replayed === 1 ? '' : 's'} from ${files.length} file${files.length === 1 ? '' : 's'} in ID order and rebuilt KeyDir with ${this.keydir.size} key${this.keydir.size === 1 ? '' : 's'}.${fixed} New active segment: ${this.name(this.activeId)}.`, { cleanup, repairs });
+    }
+
+    compactStart() {
+      const bad = this._guard();
+      if (bad) return bad;
+      if (this.compaction) return fail('ErrCompactionRunning', 'A compaction is already running. Step it to the end first.');
+      const A = this.activeId;
+      this.files.get(A).sealed = true;
+      const M = this.nextId++;
+      this.activeId = this._newSegment();
+      const inputs = this.sortedFiles().filter((f) => f.id < M && f.kind !== 'tmp').map((f) => f.id);
+      this.compaction = { phase: 'reserved', M, inputs, pending: [] };
+      return ok(`Compaction 1/5, under the writer lock: sealed ${this.name(A)}, reserved ID ${M} for the output, opened ${this.name(this.activeId)} as the new active segment. Inputs: all ${inputs.length} sealed file${inputs.length === 1 ? '' : 's'} (IDs below ${M}). The lock is released now.`);
+    }
+
+    compactStep() {
+      const bad = this._guard();
+      if (bad) return bad;
+      const c = this.compaction;
+      if (!c) return this.compactStart();
+      const M = c.M;
+
+      if (c.phase === 'reserved') {
+        const tmp = { id: M, kind: 'tmp', records: [], sealed: false };
+        this.files.set(M, tmp);
+        let dead = 0;
+        let tombs = 0;
+        for (const id of c.inputs) {
+          const f = this.files.get(id);
+          for (const r of f.records) {
+            if (r.torn || r.damaged) {
+              this.files.delete(M);
+              this.compaction = null;
+              return fail('ErrCorrupt', `Compaction aborted: the scanner hit a corrupt record in ${this.name(id)} at offset ${r.offset}. The .tmp file was deleted and nothing else changed, so compaction cannot remove the damage either.`);
+            }
+            if (r.type === TYPE_DEL) {
+              tombs++;
+              continue;
+            }
+            const e = this.keydir.get(r.key);
+            if (e && e.fileId === id && e.offset === r.offset) {
+              const off = this.fileSize(tmp);
+              tmp.records.push({ ...r, offset: off });
+              c.pending.push({ key: r.key, offset: off, size: r.size, valueSize: byteLen(r.value) });
+            } else {
+              dead++;
+            }
+          }
+        }
+        c.phase = 'copied';
+        return ok(`Compaction 2/5, no lock held: copied ${c.pending.length} live record${c.pending.length === 1 ? '' : 's'} (${this.fileSize(tmp)} B) into compact_${M}.tmp. Skipped ${dead} old version${dead === 1 ? '' : 's'} and ${tombs} tombstone${tombs === 1 ? '' : 's'}. PUT and DELETE keep working meanwhile.`);
+      }
+
+      if (c.phase === 'copied') {
+        const f = this.files.get(M);
+        f.kind = 'compact';
+        f.sealed = true;
+        c.phase = 'renamed';
+        return ok(`Compaction 3/5: fsync compact_${M}.tmp, rename it to compact_${M}.data, fsync the directory. From this moment the output is the truth on disk: if the process dies now, recovery finishes the job.`);
+      }
+
+      if (c.phase === 'renamed') {
+        let moved = 0;
+        let left = 0;
+        for (const p of c.pending) {
+          const e = this.keydir.get(p.key);
+          if (e && e.fileId < M) {
+            this.keydir.set(p.key, { fileId: M, offset: p.offset, size: p.size, valueSize: p.valueSize });
+            moved++;
+          } else {
+            left++;
+          }
+        }
+        c.phase = 'swapped';
+        const why = left ? ` Left ${left} alone: they were overwritten or deleted during the merge, so their newer KeyDir entry wins.` : '';
+        return ok(`Compaction 4/5, short KeyDir locks in batches: moved ${moved} key${moved === 1 ? '' : 's'} to compact_${M}.data.${why}`);
+      }
+
+      const before = this.stats().diskBytes;
+      for (const id of c.inputs) this.files.delete(id);
+      this.compaction = null;
+      const freed = before - this.stats().diskBytes;
+      return ok(`Compaction 5/5: removed ${c.inputs.length} old file${c.inputs.length === 1 ? '' : 's'} from the segment set, deleted them, fsynced the directory. Freed ${freed} B.`);
+    }
+
+    compactAll() {
+      const msgs = [];
+      if (!this.compaction) {
+        const r = this.compactStart();
+        msgs.push(r);
+        if (!r.ok) return msgs;
+      }
+      while (this.compaction) {
+        const r = this.compactStep();
+        msgs.push(r);
+        if (!r.ok) break;
+      }
+      return msgs;
+    }
+
+    // The design doc's invariants (§3.4), checked by scanning the files independently of KeyDir.
+    checkInvariants() {
+      const last = new Map();
+      for (const f of this.sortedFiles()) {
+        if (f.kind === 'tmp') continue;
+        for (const r of f.records) last.set(r.key, r);
+      }
+      const live = [...last.entries()].filter(([, r]) => r.type === TYPE_PUT).map(([k]) => k);
+      const problems = [];
+      if (live.length !== this.keydir.size) {
+        problems.push(`KeyDir has ${this.keydir.size} keys but the log has ${live.length} live keys`);
+      }
+      for (const k of live) if (!this.keydir.has(k)) problems.push(`live key ${k} is missing from KeyDir`);
+      for (const [k, e] of this.keydir) {
+        const f = this.files.get(e.fileId);
+        const rec = f && f.records.find((r) => r.offset === e.offset);
+        if (!rec) problems.push(`KeyDir[${k}] points at nothing`);
+        else if (rec.damaged || rec.torn) problems.push(`KeyDir[${k}] points at a record whose CRC fails`);
+        else if (rec.key !== k) problems.push(`KeyDir[${k}] points at a record for ${rec.key}`);
+        else if (!last.get(k) || last.get(k).type !== TYPE_PUT || last.get(k).value !== rec.value) problems.push(`KeyDir[${k}] points at a stale value`);
+      }
+      return { ok: problems.length === 0, problems, liveKeys: live.length, keydirKeys: this.keydir.size };
+    }
+
+    isLive(fileId, rec) {
+      const e = this.keydir.get(rec.key);
+      return !!e && rec.type === TYPE_PUT && e.fileId === fileId && e.offset === rec.offset;
+    }
+  }
+
+  const TC = { HEADER, TYPE_PUT, TYPE_DEL, SIM_LIMITS, byteLen, crc32, encodeRecord, decodeRecord, Sim };
+  if (typeof module !== 'undefined' && module.exports) module.exports = TC;
+  else root.TC = TC;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+<script>
+(function () {
+  'use strict';
+  const $ = (s, r) => (r || document).querySelector(s);
+  const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  /* ---------- Go syntax highlighting ---------- */
+  const goRe = /(\/\/[^\n]*)|("(?:[^"\\\n]|\\.)*"|`[^`]*`|'(?:[^'\\\n]|\\.)')|\b(func|type|struct|interface|return|if|else|for|range|defer|go|select|case|default|var|const|package|import|map|chan|nil|break|continue|switch)\b|\b(\d+)\b/g;
+  function highlightGo(src) {
+    let out = '';
+    let last = 0;
+    let m;
+    goRe.lastIndex = 0;
+    while ((m = goRe.exec(src))) {
+      out += esc(src.slice(last, m.index));
+      if (m[1]) out += '<span class="tk-c">' + esc(m[1]) + '</span>';
+      else if (m[2]) out += '<span class="tk-s">' + esc(m[2]) + '</span>';
+      else if (m[3]) out += '<span class="tk-k">' + esc(m[3]) + '</span>';
+      else out += '<span class="tk-n">' + esc(m[4]) + '</span>';
+      last = goRe.lastIndex;
+    }
+    return out + esc(src.slice(last));
+  }
+  $$('pre code.go').forEach((el) => { el.innerHTML = highlightGo(el.textContent); });
+
+  /* ---------- simulator ---------- */
+  const sim = new TC.Sim({ maxSeg: 128 });
+  const colors = new Map();
+  const colorOf = (k) => { if (!colors.has(k)) colors.set(k, colors.size % 8); return colors.get(k); };
+  const entries = [];
+  let flashKey = null;
+  const keyIn = $('#sim-key');
+  const valIn = $('#sim-val');
+  function log(op, res) {
+    entries.unshift({ op, ok: res.ok, msg: res.msg });
+    if (entries.length > 16) entries.pop();
+  }
+  function seed() {
+    [['user', 'ann'], ['city', 'Kyiv'], ['user', 'bob'], ['lang', 'go'], ['city', 'Lviv']].forEach(([k, v]) => { colorOf(k); log('PUT', sim.put(k, v)); });
+  }
+  const acts = {
+    put() { flashKey = keyIn.value; log('PUT', sim.put(keyIn.value, valIn.value)); },
+    get() { flashKey = keyIn.value; log('GET', sim.get(keyIn.value)); },
+    del() { log('DELETE', sim.del(keyIn.value)); },
+    cstep() { log('COMPACT', sim.compactStep()); },
+    call() { sim.compactAll().forEach((r) => log('COMPACT', r)); },
+    crash() { log('CRASH', sim.crash()); },
+    torn() { log('CRASH', sim.tornPut(keyIn.value, valIn.value)); },
+    rot() { log('BIT ROT', sim.damageOld()); },
+    repair() { log('REPAIR', sim.repair()); },
+    restart() { log('RESTART', sim.restart()); },
+    reset() { sim.reset(); colors.clear(); entries.length = 0; log('RESET', { ok: true, msg: 'Empty database. seg_1.data is the active segment.' }); },
+  };
+  $('#simulator').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-act]');
+    if (!b || b.disabled) return;
+    acts[b.dataset.act]();
+    render();
+  });
+  [keyIn, valIn].forEach((el) => el.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); acts.put(); render(); } }));
+
+  const shortName = (f) => f.kind === 'compact' ? 'compact_' + f.id + '.data' : f.kind === 'tmp' ? 'compact_' + f.id + '.tmp' : 'seg_' + f.id + '.data';
+  function recHtml(f, r, scale) {
+    const w = (r.size / scale) * 100;
+    let cls = 'rec';
+    let label;
+    let state;
+    if (r.torn) { cls += ' torn'; label = 'torn'; state = 'torn: only ' + r.size + ' of ' + r.fullSize + ' bytes written'; }
+    else if (r.damaged) { cls += ' rot'; label = 'bit rot'; state = 'damaged: CRC fails'; }
+    else if (r.type === TC.TYPE_DEL) { cls += ' tomb'; label = '✕ ' + r.key; state = 'tombstone'; }
+    else {
+      const live = f.kind === 'tmp' || sim.isLive(f.id, r);
+      cls += ' k' + colorOf(r.key) + (live ? '' : ' dead');
+      label = r.key + '=' + r.value;
+      state = f.kind === 'tmp' ? 'copy in progress' : live ? 'live' : 'garbage';
+    }
+    const title = (r.type === TC.TYPE_DEL ? 'DELETE ' + r.key : 'PUT ' + r.key + '=' + r.value) + ' · offset ' + r.offset + ' · ' + r.size + ' B · ' + state;
+    return '<span class="' + cls + '" style="width:' + w.toFixed(3) + '%" title="' + esc(title) + '"><span>' + esc(label) + '</span></span>';
+  }
+  function render() {
+    const st = sim.stats();
+    const running = sim.status === 'running';
+    const proc = $('#st-proc');
+    proc.className = 'pill ' + (running ? 'good' : sim.status === 'crashed' ? 'warn' : 'bad');
+    proc.textContent = running ? 'Running' : sim.status === 'crashed' ? 'Down: press Restart' : 'Open failed: ErrCorrupt';
+    const c = sim.compaction;
+    const next = { reserved: 2, copied: 3, renamed: 4, swapped: 5 };
+    const merge = $('#st-merge');
+    merge.className = 'pill ' + (c ? 'info' : '');
+    merge.textContent = c ? 'Compacting into ID ' + c.M + ': step ' + (next[c.phase] - 1) + '/5 done' : 'No compaction';
+    $('#cstep').textContent = c ? 'Next: step ' + next[c.phase] + '/5' : 'Start (step 1/5)';
+    const inv = $('#st-inv');
+    if (running) {
+      const r = sim.checkInvariants();
+      inv.className = 'pill ' + (r.ok ? 'good' : 'bad');
+      inv.textContent = r.ok ? 'Invariants hold' : 'Invariant broken';
+      inv.title = r.ok ? 'KeyDir matches the files, and every entry has a valid CRC' : r.problems.join('; ');
+    } else {
+      inv.className = 'pill';
+      inv.textContent = 'Invariants: not checked while down';
+      inv.title = '';
+    }
+    $('#st-stats').textContent = st.keys + ' keys · ' + st.files + ' files · disk ' + st.diskBytes + ' B · live ' + st.liveBytes + ' B · garbage ' + Math.round(st.garbage * 100) + '%';
+
+    $$('#simulator button[data-act]').forEach((b) => {
+      const a = b.dataset.act;
+      if (['put', 'get', 'del', 'cstep', 'call', 'crash', 'torn'].includes(a)) b.disabled = !running;
+    });
+    let damaged = false;
+    for (const f of sim.files.values()) for (const r of f.records) if (r.damaged) damaged = true;
+    $('#repair').disabled = !damaged;
+    $('#restart').classList.toggle('call-out', !running);
+
+    const files = sim.sortedFiles();
+    let scale = sim.maxSeg;
+    for (const f of files) scale = Math.max(scale, sim.fileSize(f));
+    let html = '';
+    let reservedShown = !(c && c.phase === 'reserved');
+    const reservedRow = () => '<div class="reserved">ID ' + c.M + ' reserved for the compaction output. No file exists yet; step 2 will write compact_' + c.M + '.tmp.</div>';
+    for (const f of files) {
+      if (!reservedShown && f.id > c.M) { html += reservedRow(); reservedShown = true; }
+      const tags = [];
+      if (f.kind === 'tmp') tags.push('<span class="ftag tmp">.tmp · not part of the database yet</span>');
+      else if (running && f.id === sim.activeId) tags.push('<span class="ftag active">active</span>');
+      else if (f.kind === 'compact') tags.push('<span class="ftag compact">compaction output</span>');
+      else tags.push('<span class="ftag">sealed</span>');
+      if (c && c.inputs.includes(f.id)) tags.push('<span class="ftag input">merge input</span>');
+      const size = sim.fileSize(f);
+      const recs = f.records.map((r) => recHtml(f, r, scale)).join('');
+      const cap = f.kind === 'seg' ? '<span class="cap" style="left:' + ((sim.maxSeg / scale) * 100).toFixed(3) + '%"></span>' : '';
+      html += '<div class="file ' + f.kind + '"><div class="file-head"><span class="fname">' + shortName(f) + '</span>' + tags.join('') + '<span class="fsize">' + size + ' B</span></div><div class="strip">' + recs + cap + '</div></div>';
+    }
+    if (!reservedShown) html += reservedRow();
+    $('#sim-files').innerHTML = html || '<p class="note">No files.</p>';
+
+    const kd = [...sim.keydir.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    let rows = '';
+    if (sim.status === 'crashed') rows = '<tr class="empty-row"><td colspan="4">Empty: RAM was lost when the process died. Restart rebuilds KeyDir from the files.</td></tr>';
+    else if (sim.status === 'failed') rows = '<tr class="empty-row"><td colspan="4">Empty: Open failed, so KeyDir was never built.</td></tr>';
+    else if (!kd.length) rows = '<tr class="empty-row"><td colspan="4">No keys. Every key has been deleted, or nothing was written yet.</td></tr>';
+    else rows = kd.map(([k, e]) => '<tr' + (k === flashKey ? ' class="flash"' : '') + '><td><span class="chip k' + colorOf(k) + '"></span>' + esc(k) + '</td><td>' + e.fileId + '</td><td>' + e.offset + '</td><td>' + e.size + '</td></tr>').join('');
+    $('#sim-kd').innerHTML = rows;
+    flashKey = null;
+
+    $('#sim-log').innerHTML = entries.map((x) => '<li class="' + (x.ok ? '' : 'err') + '"><span class="op">' + esc(x.op) + '</span><span>' + esc(x.msg) + '</span></li>').join('');
+  }
+  seed();
+  render();
+
+  /* ---------- byte encoder ---------- */
+  const TS = 1795089600000000000n;
+  const encKey = $('#enc-key');
+  const encVal = $('#enc-val');
+  const encType = $('#enc-type');
+  let bytes = null;
+  let original = null;
+  const flipped = new Set();
+  const hex2 = (n) => n.toString(16).padStart(2, '0');
+  const hex8 = (n) => '0x' + (n >>> 0).toString(16).toUpperCase().padStart(8, '0');
+  function encBuild() {
+    const t = Number(encType.value);
+    encVal.disabled = t === 2;
+    bytes = TC.encodeRecord(TS, t, encKey.value, t === 2 ? '' : encVal.value);
+    original = Uint8Array.from(bytes);
+    flipped.clear();
+    encRender();
+  }
+  function encRender() {
+    const k = TC.byteLen(encKey.value);
+    const total = bytes.length;
+    const groups = [
+      ['CRC32', 'f-crc', 0, 4, 'bytes 0–3'],
+      ['Timestamp', 'f-ts', 4, 12, 'bytes 4–11'],
+      ['Type', 'f-type', 12, 13, 'byte 12'],
+      ['Key size', 'f-ksz', 13, 17, 'bytes 13–16'],
+      ['Value size', 'f-vsz', 17, 21, 'bytes 17–20'],
+      ['Key', 'f-key', 21, 21 + k, k + ' B'],
+      ['Value', 'f-val', 21 + k, total, (total - 21 - k) + ' B'],
+    ];
+    $('#enc-bytes').innerHTML = groups.filter((g) => g[3] > g[2]).map((g) => {
+      let cells = '';
+      for (let i = g[2]; i < g[3]; i++) {
+        cells += '<button class="byte' + (flipped.has(i) ? ' flipped' : '') + '" data-i="' + i + '" title="byte ' + i + ': click to flip its lowest bit" aria-label="byte ' + i + ', value ' + hex2(bytes[i]) + '">' + hex2(bytes[i]) + '</button>';
+      }
+      return '<div class="bgroup ' + g[1] + '"><div class="bgroup-label">' + g[0] + ' <small>' + g[4] + '</small></div><div class="bcells">' + cells + '</div></div>';
+    }).join('');
+    const d = TC.decodeRecord(bytes);
+    const typeName = (t) => t === 1 ? '1 · PUT' : t === 2 ? '2 · DELETE' : t + ' · unknown';
+    let date = '';
+    try { date = new Date(Number(d.ts / 1000000n)).toISOString().replace('.000Z', 'Z'); } catch (e) { date = 'not a valid date'; }
+    const rows = [
+      ['CRC stored', hex8(d.storedCrc)],
+      ['CRC computed', d.computedCrc !== undefined ? hex8(d.computedCrc) + (d.computedCrc === d.storedCrc ? ' ✓' : ' ✗') : 'not reached'],
+      ['Timestamp', d.ts.toString() + ' ns<br><span style="color:var(--ink-3)">' + esc(date) + '</span>'],
+      ['Type', typeName(d.type)],
+      ['Key size', String(d.keySize)],
+      ['Value size', String(d.valSize)],
+    ];
+    if (d.ok) { rows.push(['Key', esc(JSON.stringify(d.key))]); rows.push(['Value', esc(JSON.stringify(d.value))]); }
+    $('#enc-fields').innerHTML = rows.map((r) => '<dt>' + r[0] + '</dt><dd>' + (r[0] === 'Timestamp' ? r[1] : esc(r[1])) + '</dd>').join('').replace(/&lt;br&gt;/g, '<br>');
+    const v = $('#enc-verdict');
+    if (d.ok) {
+      v.innerHTML = '<span class="pill good">valid record · ' + d.size + ' bytes</span><p>The decoder passed all five checks: header length, type, size limits, payload length, CRC. This is exactly what GET and recovery do with every record.</p>' + (flipped.size ? '<p>Your flips cancelled out: each click flips the lowest bit, so two clicks on the same byte restore it.</p>' : '<p>Click any byte to flip one bit.</p>');
+    } else {
+      const stage = { type: 'type', limits: 'size limits', payload: 'payload length', crc: 'CRC', header: 'header length' }[d.stage];
+      v.innerHTML = '<span class="pill bad">rejected at the ' + stage + ' check</span><p>' + esc(d.reason[0].toUpperCase() + d.reason.slice(1)) + '.</p><p>A running engine returns <code>ErrCorrupt</code>. During recovery, the same failure at the end of the newest file means a torn write and is truncated; anywhere else, the database refuses to open.</p>';
+    }
+  }
+  $('#enc-bytes').addEventListener('click', (e) => {
+    const b = e.target.closest('.byte');
+    if (!b) return;
+    const i = Number(b.dataset.i);
+    bytes[i] ^= 1;
+    if (bytes[i] === original[i]) flipped.delete(i); else flipped.add(i);
+    encRender();
+    const again = $('.byte[data-i="' + i + '"]');
+    if (again) again.focus();
+  });
+  [encKey, encVal].forEach((el) => el.addEventListener('input', encBuild));
+  encType.addEventListener('change', encBuild);
+  $('#enc-reset').addEventListener('click', () => { bytes = Uint8Array.from(original); flipped.clear(); encRender(); });
+  encBuild();
+
+  /* ---------- step-through stories ---------- */
+  function stepper(root, getFrames) {
+    let i = 0;
+    const view = $('.st-view', root);
+    const prev = $('.st-prev', root);
+    const next = $('.st-next', root);
+    const count = $('.st-count', root);
+    function show() {
+      const frames = getFrames();
+      i = Math.max(0, Math.min(i, frames.length - 1));
+      view.innerHTML = frames[i];
+      count.textContent = 'Step ' + (i + 1) + ' of ' + frames.length;
+      prev.disabled = i === 0;
+      next.disabled = i === frames.length - 1;
+    }
+    prev.addEventListener('click', () => { i--; show(); });
+    next.addEventListener('click', () => { i++; show(); });
+    return { show, reset() { i = 0; show(); } };
+  }
+
+  const race = {
+    split: {
+      rows: [
+        ['Lock the file. Append x=A at offset 0. Unlock.', 'Waits for the file lock.', '[x=A]', '—'],
+        ['Paused by the scheduler.', 'Lock the file. Append x=B at offset 23. Unlock.', '[x=A][x=B]', '—'],
+        ['Still paused.', 'Lock KeyDir. KeyDir[x] = 23 (B). Unlock. Client gets OK.', '[x=A][x=B]', '23 → B'],
+        ['Lock KeyDir. KeyDir[x] = 0 (A). Unlock. Client gets OK.', 'Done.', '[x=A][x=B]', '0 → A'],
+      ],
+      wrong: 3,
+      result: '<div class="result bad"><b>Broken.</b> GET x returns A, but the newest record in the log is B. After a restart, recovery replays the log in order and x becomes B: the value changes by itself, and both clients were told OK. <code>go test -race</code> would not catch this, because every access was under a lock. It is a race condition, not a data race.</div>',
+    },
+    one: {
+      rows: [
+        ['Take the writer lock. Append x=A at offset 0.', 'Waits for the writer lock.', '[x=A]', '—'],
+        ['KeyDir[x] = 0 (A). Release the lock. Client gets OK.', 'Still waiting.', '[x=A]', '0 → A'],
+        ['Done.', 'Take the writer lock. Append x=B at offset 23.', '[x=A][x=B]', '0 → A'],
+        ['Done.', 'KeyDir[x] = 23 (B). Release the lock. Client gets OK.', '[x=A][x=B]', '23 → B'],
+      ],
+      wrong: -1,
+      result: '<div class="result good"><b>Correct.</b> The writer lock covers the append and the KeyDir update, so the order of updates in KeyDir always equals the order of records in the log. GET x returns B, before and after a restart.</div>',
+    },
+  };
+  let raceV = 'split';
+  function raceFrames() {
+    const d = race[raceV];
+    const frames = [];
+    const intro = '<p class="st-frame-title">Setup</p><p style="margin:0">Two goroutines handle two clients. Goroutine 1 runs <code>PUT x=A</code>, goroutine 2 runs <code>PUT x=B</code>, at the same moment. Each record is 23 bytes (21 header + 1 + 1). Press Next to let the scheduler run them.</p>';
+    frames.push(intro);
+    for (let s = 0; s <= d.rows.length; s++) {
+      if (s === 0) continue;
+      let t = '<div class="tbl" style="margin:0"><table class="race"><thead><tr><th>#</th><th>Goroutine 1 · PUT x=A</th><th>Goroutine 2 · PUT x=B</th><th>Log (seg_1)</th><th>KeyDir[x]</th></tr></thead><tbody>';
+      for (let r = 0; r < s; r++) {
+        const row = d.rows[r];
+        const cls = r === d.wrong && r === s - 1 ? 'wrong' : r === s - 1 ? 'now' : '';
+        t += '<tr class="' + cls + '"><td class="mono">' + (r + 1) + '</td><td>' + row[0] + '</td><td>' + row[1] + '</td><td class="mono">' + row[2] + '</td><td class="mono">' + row[3] + '</td></tr>';
+      }
+      t += '</tbody></table></div>';
+      if (s === d.rows.length) t += d.result;
+      frames.push(t);
+    }
+    return frames;
+  }
+  const raceSt = stepper($('#race'), raceFrames);
+  $$('#race .tab').forEach((tab) => tab.addEventListener('click', () => {
+    raceV = tab.dataset.v;
+    $$('#race .tab').forEach((t) => t.setAttribute('aria-selected', String(t === tab)));
+    raceSt.reset();
+  }));
+  raceSt.show();
+
+  const mrec = (t, cls, style) => '<span class="mrec ' + (cls || '') + '"' + (style ? ' style="' + style + '"' : '') + '>' + t + '</span>';
+  const mfile = (name, recs, tag, cls, hot) => '<div class="mini-file ' + (cls || '') + '"><span class="mini-name">' + name + '</span><span class="mini-recs">' + (recs || mrec('empty', 'empty')) + '</span><span class="mini-tag' + (hot ? ' hot' : '') + '">' + (tag || '') + '</span></div>';
+  const resFrames = [
+    '<p class="st-frame-title">The situation</p><div class="mini">' + mfile('seg_1.data', mrec('x=1', 'dead'), 'sealed') + mfile('seg_2.data', mrec('✕ x', 'tomb'), 'sealed') + mfile('seg_3.data', '', 'active') + '</div><div class="mini-kd">KeyDir: { } · x does not exist</div><p class="st-note">x was written, then deleted. The old <code>x=1</code> still sits in seg_1. The tombstone in seg_2 is the only thing that keeps x deleted after a restart.</p>',
+    '<p class="st-frame-title">A tempting shortcut</p><div class="mini">' + mfile('seg_1.data', mrec('x=1', 'dead'), 'not merged') + mfile('seg_2.data', mrec('✕ x', 'tomb'), 'picked: most garbage', '', true) + mfile('seg_3.data', '', 'active') + '</div><div class="mini-kd">KeyDir: { }</div><p class="st-note">Imagine a compactor that merges only the file with the most garbage. It picks seg_2. Its only record is a tombstone, and tombstones are never copied, so the output is empty.</p>',
+    '<p class="st-frame-title">The tombstone is gone</p><div class="mini">' + mfile('seg_1.data', mrec('x=1', 'dead'), 'still here') + mfile('seg_2.data', mrec('✕ x', 'tomb'), 'deleted', 'gone') + mfile('seg_3.data', '', 'active') + '</div><div class="mini-kd">KeyDir: { } · still correct, for now</div><p class="st-note">seg_2 is deleted. While the process runs, nothing looks wrong: KeyDir still has no x.</p>',
+    '<p class="st-frame-title">Restart</p><div class="mini">' + mfile('seg_1.data', mrec('x=1', 'back'), 'replayed', '', true) + mfile('seg_3.data', '', 'sealed') + mfile('seg_4.data', '', 'active') + '</div><div class="mini-kd" style="color:var(--bad)">KeyDir: { x → seg_1 } · x is back</div><p class="st-note">Recovery replays seg_1, finds <code>x=1</code>, and nothing deletes it any more. A deleted key has come back to life. This bug is called <b>resurrection</b>.</p>',
+    '<p class="st-frame-title">TinyCask\'s rule</p><div class="mini">' + mfile('seg_1.data', mrec('x=1', 'dead'), 'input', 'gone') + mfile('seg_2.data', mrec('✕ x', 'tomb'), 'input', 'gone') + mfile('compact_4.data', '', 'output: nothing live') + mfile('seg_5.data', '', 'active') + '</div><div class="mini-kd" style="color:var(--live)">KeyDir: { } · after any restart: still { }</div><p class="st-note">Compaction always merges <b>all</b> sealed files. x=1 is not live and the tombstone is dropped, but both files go together, so there is nothing left to resurrect. A tombstone may only be dropped when every older record of its key is dropped with it.</p>',
+  ];
+  stepper($('#resurrect'), () => resFrames).show();
+
+  /* ---------- glossary ---------- */
+  const G = [
+    ['Active segment', '', 'The one file that receives new writes. Always the highest regular segment ID.', 'files'],
+    ['Advisory lock (flock)', '', 'An OS lock that only stops programs that ask for it. Released automatically when the process dies. Used for the LOCK file.', 'files'],
+    ['Append-only log', '', 'Data is only ever added at the end of a file and never changed in place.', 'idea'],
+    ['Atomic rename', '', 'rename() replaces a name in one step: observers see the old or the new name, never a mix. Compaction\'s commit point.', 'compaction'],
+    ['Binary-safe', '', 'A protocol where values may contain any bytes because each value is prefixed with its length.', 'protocol'],
+    ['Bit rot', '', 'Bits on a storage device that change by themselves over time. Detected by the CRC.', 'record'],
+    ['Bitcask', '', 'The log-structured hash table design (Basho, 2010) that TinyCask follows.', 'idea'],
+    ['Bulk string', '', 'A RESP value written as $length, then the bytes. Binary-safe.', 'protocol'],
+    ['CommandIndex', '', 'The KeyDir entry: FileID, ValueSize, ValueOffset, Timestamp.', 'memory'],
+    ['Compaction', '', 'Copying only live records from old files into a new file, then deleting the old files, to reclaim disk space.', 'compaction'],
+    ['Conditional update', '', 'Compaction moves a KeyDir entry to the new file only if it still points at an old file (UpdateIf).', 'compaction'],
+    ['Conformance suite', '', 'One test suite run against both the real and the fake file system, to keep the fake honest.', 'vfs'],
+    ['context.Context', '', 'Go\'s way to send a cancellation signal to goroutines. ctx.Done() closes when cancel() is called.', 'go'],
+    ['CRC32', '', 'A 32-bit checksum that always changes when a single bit or a burst of up to 32 bits changes. IEEE polynomial.', 'record'],
+    ['Crash recovery', '', 'Rebuilding KeyDir from the files at startup, repairing a torn tail and finishing an interrupted compaction.', 'recovery'],
+    ['Critical section', '', 'Code that runs while holding a lock. Kept as short as possible.', 'locks'],
+    ['Data directory', '', 'The directory holding all segment files and the LOCK file.', 'files'],
+    ['Data race', '', 'Two goroutines access the same memory at once without synchronization, one of them writing. Found by go test -race.', 'locks'],
+    ['Deadlock', '', 'Goroutines wait for each other\'s locks forever. Prevented by a fixed lock order.', 'locks'],
+    ['Dead record (garbage)', '', 'A record KeyDir no longer points at: an old version or a deleted key. Removed by compaction.', 'idea'],
+    ['depguard', '', 'A golangci-lint check that forbids certain imports in certain packages. Enforces the layer rules.', 'packages'],
+    ['diskBytes / liveBytes', '', 'Total size of all data files / of the records KeyDir points at. Their ratio drives compaction.', 'memory'],
+    ['Durability', '', 'Acknowledged data stays saved through crashes and, depending on the sync mode, power loss.', 'durability'],
+    ['Exported name', '', 'A Go identifier starting with a capital letter, visible to other packages.', 'go'],
+    ['Fail-stop', '', 'On damage that cannot be safely repaired, stop with a clear error instead of continuing with wrong data.', 'recovery'],
+    ['Fault injection', '', 'Deliberately making operations fail in tests to check that failures are handled.', 'vfs'],
+    ['File ID', '', 'The growing number in each data file\'s name. Lower ID = older data.', 'files'],
+    ['Frame (record)', '', 'One PUT or DELETE on disk: a 21-byte header plus key and value.', 'record'],
+    ['fsync', '', 'A system call that waits until a file\'s data is physically stored on the device.', 'durability'],
+    ['fsyncgate', '', 'The 2018 discovery that retrying a failed fsync on Linux can falsely succeed. Why TinyCask never retries.', 'durability'],
+    ['Fuzzing', '', 'Feeding millions of generated inputs to a function to find crashes. go test -fuzz.', 'testing'],
+    ['Garbage ratio', '', '1 − liveBytes / diskBytes. Compaction starts automatically at 0.5 or more.', 'memory'],
+    ['Golden test', '', 'A test that compares output with committed bytes, so the format cannot change by accident.', 'testing'],
+    ['Goroutine', '', 'A lightweight thread run by the Go runtime. Started with go f().', 'locks'],
+    ['Graceful shutdown', '', 'On Ctrl+C or SIGTERM: stop accepting, finish running commands, close the engine cleanly.', 'protocol'],
+    ['Header', '', 'The fixed 21 bytes at the start of a record: CRC, timestamp, type, key size, value size.', 'record'],
+    ['Hint file', '', 'An optional per-segment index that speeds up startup. Out of scope for TinyCask.', 'scope'],
+    ['Idempotent', '', 'Doing it twice has the same effect as once. Close is idempotent.', 'errors'],
+    ['Immutable (sealed) segment', '', 'A segment that is full, fsynced and never written again. Read-only.', 'files'],
+    ['Inline command', '', 'The plain-text request form SET key value\\r\\n, for typing by hand.', 'protocol'],
+    ['internal/', '', 'A Go directory whose packages can only be imported from inside the same module.', 'packages'],
+    ['Invariant', '', 'A statement that must always be true, e.g. KeyDir size = number of live keys in the log.', 'testing'],
+    ['KeyDir', '', 'The in-memory hash map from each key to the location of its newest record.', 'memory'],
+    ['Little-endian', '', 'Byte order with the least significant byte first: 4 is stored as 04 00 00 00.', 'record'],
+    ['Live record', '', 'The record KeyDir points at: the newest version of a key.', 'compaction'],
+    ['Lock order', '', 'writer → KeyDir → Store. Locks are only ever taken in this order.', 'locks'],
+    ['Model test', '', 'Random operations and crashes checked against a simple reference (a Go map).', 'testing'],
+    ['Mutex / RWMutex', '', 'Locks: one holder at a time / many readers or one writer.', 'locks'],
+    ['O_APPEND', '', 'A file flag that makes every write go to the current end of the file.', 'paths'],
+    ['Offset', '', 'A byte position in a file, counting from 0.', 'record'],
+    ['P99 latency', '', 'The response time that 99% of requests beat.', 'testing'],
+    ['Page cache', '', 'RAM where the kernel keeps file data before writing it to disk. Survives a process crash, not a power cut.', 'durability'],
+    ['Pipelining', '', 'Sending many requests without waiting for each reply.', 'protocol'],
+    ['pread (ReadAt)', '', 'Read N bytes at offset X without a shared file position. Safe from many goroutines at once.', 'paths'],
+    ['Race condition', '', 'A wrong result caused by timing, even when every access is locked. The lost-update bug.', 'locks'],
+    ['Read-only mode', '', 'After a failed fsync or truncate, the engine refuses writes until restart but keeps serving reads.', 'paths'],
+    ['Reserved ID (M)', '', 'The file ID set aside for a compaction\'s output: above all inputs, below all newer files.', 'compaction'],
+    ['RESP2', '', 'The Redis serialization protocol, version 2. TinyCask speaks a subset of it.', 'protocol'],
+    ['Resurrection', '', 'A deleted key comes back because its tombstone was dropped while an older value survived.', 'compaction'],
+    ['Roll (rotation)', '', 'Sealing the full active segment and starting a new one.', 'files'],
+    ['RPO', '', 'Recovery point objective: how much acknowledged data may be lost in a failure.', 'durability'],
+    ['Segment', '', 'One data file of the log, up to 64 MiB.', 'files'],
+    ['Segment set (Store)', '', 'The map of open files by ID, protected by the Store lock.', 'locks'],
+    ['Sentinel error', '', 'A package-level error value compared with errors.Is, e.g. ErrKeyNotFound.', 'errors'],
+    ['SimFS', '', 'TinyCask\'s in-memory fake file system that can fail and crash on command.', 'vfs'],
+    ['Single-flight', '', 'At most one instance runs at a time; a second request is refused. Used for compaction.', 'compaction'],
+    ['Supersede rule', '', 'compact_M.data replaces every data file with an ID below M.', 'files'],
+    ['SyncDir', '', 'fsync of a directory, so that created, renamed and deleted file names are durable.', 'durability'],
+    ['Throughput', '', 'Operations completed per second.', 'testing'],
+    ['Tombstone', '', 'A record of type 2 that marks a key as deleted.', 'paths'],
+    ['Torn write', '', 'A record only partly written because the process or power died mid-write.', 'recovery'],
+    ['Truncate', '', 'Cutting a file back to a given length. Removes a torn or failed tail.', 'recovery'],
+    ['UpdateIf', '', 'KeyDir method: replace an entry only if a condition on the old entry holds, atomically.', 'memory'],
+    ['VFS', '', 'The vfs.FS and vfs.File interfaces that all disk I/O goes through.', 'vfs'],
+    ['WaitGroup', '', 'Counts running goroutines; Wait() blocks until all are done.', 'go'],
+    ['Writer lock', '', 'The mutex that serializes appends together with their KeyDir updates.', 'paths'],
+  ];
+  const chapterNo = { idea: 1, sim: 2, record: 3, files: 4, memory: 5, paths: 6, recovery: 7, compaction: 8, locks: 9, durability: 10, errors: 11, protocol: 12, packages: 13, vfs: 14, testing: 15, scope: 16, go: 17 };
+  function renderGloss() {
+    const q = $('#gloss-q').value.trim().toLowerCase();
+    const list = G.filter((g) => !q || (g[0] + ' ' + g[2]).toLowerCase().includes(q));
+    $('#gloss').innerHTML = list.map((g) => '<div><dt>' + esc(g[0]) + '</dt><dd>' + esc(g[2]) + ' <a href="#' + g[3] + '">ch. ' + chapterNo[g[3]] + '</a></dd></div>').join('') || '<p class="note">No term matches.</p>';
+    $('#gloss-n').textContent = list.length + ' of ' + G.length + ' terms';
+  }
+  $('#gloss-q').addEventListener('input', renderGloss);
+  renderGloss();
+
+  /* ---------- chapter rail highlight ---------- */
+  const links = new Map($$('.rail a').map((a) => [a.getAttribute('href').slice(1), a]));
+  if ('IntersectionObserver' in window) {
+    const io = new IntersectionObserver((list) => {
+      list.forEach((en) => {
+        if (en.isIntersecting) {
+          links.forEach((a) => a.removeAttribute('aria-current'));
+          const a = links.get(en.target.id);
+          if (a) a.setAttribute('aria-current', 'true');
+        }
+      });
+    }, { rootMargin: '-20% 0px -70% 0px' });
+    $$('.chapter').forEach((s) => io.observe(s));
+  }
+})();
+</script>
+
+</body>
+</html>
