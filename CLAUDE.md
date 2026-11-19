@@ -94,6 +94,15 @@ Smoke test against a running server: `redis-cli -p 6380 PING`.
 
 If any item fails, the ticket is not done: say so and show the failing output.
 
+## Subagents (`.claude/agents/`)
+
+Closing a ticket that touches disk: `fault-test-writer` (missing failure-path tests) → `invariant-reviewer` (fix every blocking finding) → `dod-verifier` (its verdict goes in your final message). Smaller tickets skip the first step.
+
+- `invariant-reviewer`: read-only review of the diff against the invariants, prohibited list and ARCHITECTURE.
+- `fault-test-writer`: writes `TestFault_`/`TestCrash_` tests on SimFS; edits only `_test.go` and `testdata/`; reports bugs instead of fixing them.
+- `dod-verifier`: runs the Verification Command and `make check`, checks every DoD item and acceptance criterion; never fixes.
+- `code-explainer`: on request, explains code line by line for the defense (Go concepts, the "why", likely examiner questions).
+
 ## Conventions worth knowing up front
 
 - The user commits. Close each ticket by proposing a message in the form `T<week>.<n>: <imperative summary>`.
