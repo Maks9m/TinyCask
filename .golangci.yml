@@ -1,0 +1,93 @@
+# golangci-lint v2 configuration. Run with `make lint`.
+version: "2"
+
+run:
+  go: "1.27"
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - depguard
+    - errcheck
+    - errorlint
+    - gocritic
+    - govet
+    - ineffassign
+    - misspell
+    - nolintlint
+    - staticcheck
+    - unused
+
+  settings:
+    errcheck:
+      # `_ = f.Close()` on a write path is prohibited (CLAUDE.md).
+      check-blank: true
+      check-type-assertions: true
+
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+
+    govet:
+      enable-all: true
+      disable:
+        # Struct field order follows readability and lock grouping, not padding.
+        - fieldalignment
+
+    misspell:
+      locale: US
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+
+    depguard:
+      rules:
+        # Invariant 1: all disk I/O goes through vfs.FS. Only internal/vfs/osfs*.go
+        # may touch os / syscall; these packages must never import them.
+        no-direct-io:
+          files:
+            - "**/internal/index/**"
+            - "**/internal/storage/**"
+            - "**/internal/compactor/**"
+            - "**/internal/engine/**"
+            - "**/internal/server/**"
+          deny:
+            - pkg: "os"
+              desc: "disk I/O must go through vfs.FS (ARCHITECTURE §2, invariant 1)"
+            - pkg: "syscall"
+              desc: "disk I/O must go through vfs.FS (ARCHITECTURE §2, invariant 1)"
+            - pkg: "golang.org/x/sys"
+              desc: "disk I/O must go through vfs.FS (ARCHITECTURE §2, invariant 1)"
+            - pkg: "io/ioutil"
+              desc: "deprecated, and disk I/O must go through vfs.FS (invariant 1)"
+        # Inside the vfs tree only the OSFS files may talk to the OS directly.
+        vfs-only-osfs:
+          files:
+            - "**/internal/vfs/**"
+            - "!**/internal/vfs/osfs*.go"
+            - "!$test"
+          deny:
+            - pkg: "os"
+              desc: "only internal/vfs/osfs*.go may use os (invariant 1)"
+            - pkg: "syscall"
+              desc: "only internal/vfs/osfs*.go may use syscall (invariant 1)"
+            - pkg: "golang.org/x/sys"
+              desc: "only internal/vfs/osfs*.go may use golang.org/x/sys (invariant 1)"
+            - pkg: "io/ioutil"
+              desc: "deprecated; use io and os in internal/vfs/osfs*.go (invariant 1)"
+        # simfs is a test double: production code must not depend on it.
+        simfs-tests-only:
+          files:
+            - "$all"
+            - "!$test"
+          deny:
+            - pkg: "github.com/Maks9m/TinyCask/internal/vfs/simfs"
+              desc: "simfs may be imported only from _test.go files (ARCHITECTURE §2)"
+
+formatters:
+  enable:
+    - gofmt

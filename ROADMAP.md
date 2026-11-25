@@ -34,7 +34,7 @@ Off the critical path (do them whenever their dependency is met, for example on 
 Goal: the leaf packages exist, are tested in isolation, and the toolchain is green from the first commit.
 
 ### T1.1 — Repository scaffolding (2 h)
-- [ ] Done
+- [x] Done
 - **Goal:** A buildable, lintable, testable empty project so every later ticket starts from `make check` passing.
 - **Files/Packages Touched:** `go.mod`, `Makefile`, `.golangci.yml`, `.gitignore`, `.github/workflows/ci.yml`, `cmd/tinycask/main.go`, `doc.go` in each package listed in ARCHITECTURE §2.
 - **Dependencies:** none.
