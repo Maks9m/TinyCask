@@ -119,7 +119,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 Goal: an embedded engine that passes the design doc's fault-injection scenarios 1 and 3.
 
 ### T2.1 — SimFS core (3 h)
-- [ ] Done
+- [x] Done
 - **Goal:** An in-memory `vfs.FS` that behaves like `OSFS`, ready to have faults added.
 - **Files/Packages Touched:** `internal/vfs/simfs/` (`simfs.go`, `file.go`, tests).
 - **Dependencies:** T1.2.
