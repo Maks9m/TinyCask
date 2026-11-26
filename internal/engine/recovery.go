@@ -1,0 +1,243 @@
+package engine
+
+import (
+	"cmp"
+	"errors"
+	"fmt"
+	"math"
+	"path/filepath"
+	"slices"
+
+	"github.com/Maks9m/TinyCask/internal/index"
+	"github.com/Maks9m/TinyCask/internal/storage"
+	"github.com/Maks9m/TinyCask/internal/vfs"
+)
+
+// recoveryPlan is what Open decides from the directory listing alone, before
+// any file is opened or changed.
+type recoveryPlan struct {
+	// remove holds every *.tmp and every data file superseded by the highest
+	// compact_<M>.data (invariant 6).
+	remove []storage.FileName
+	// replay holds the remaining data files in ascending ID order, which is
+	// write order (invariant 4).
+	replay []storage.FileName
+	// nextID is the new active segment: one above every data file seen.
+	nextID uint32
+}
+
+// tailCut is a torn or corrupt tail found in the highest-ID file.
+type tailCut struct {
+	name   storage.FileName
+	offset int64 // end of the last valid record: the file is cut back to it
+	size   int64 // file size before the cut
+}
+
+// recover rebuilds KeyDir and the counters from dir and creates the new
+// active segment (ARCHITECTURE §5.4). Called by Open before the engine is
+// shared, so it needs no writer lock.
+//
+// Every file is scanned before anything on disk changes, so an Open that
+// fails on corruption in a sealed file leaves the directory exactly as it
+// found it. Only then are stale files removed, the tail repaired, the files
+// registered and the active segment created. An I/O error in those later
+// steps may leave the deletes done; every step is idempotent, so the next
+// Open simply finishes the job.
+func (e *Engine) recover(fsys vfs.FS) error {
+	names, err := fsys.List(e.dir)
+	if err != nil {
+		return fmt.Errorf("engine: list %s: %w", e.dir, err)
+	}
+	plan, err := planRecovery(names)
+	if err != nil {
+		return fmt.Errorf("engine: recover %s: %w", e.dir, err)
+	}
+
+	var cut *tailCut
+	for i, name := range plan.replay {
+		last := i == len(plan.replay)-1
+		if cut, err = e.replayFile(fsys, name, last); err != nil {
+			return err
+		}
+	}
+
+	if err = e.removeStale(fsys, plan.remove); err != nil {
+		return err
+	}
+	if cut != nil {
+		if err = e.repairTail(fsys, *cut); err != nil {
+			return err
+		}
+	}
+	for _, name := range plan.replay {
+		if err = e.store.Register(name); err != nil {
+			return translate(fmt.Errorf("engine: recover: register %s: %w", name, err))
+		}
+	}
+	if err = e.store.CreateActive(plan.nextID); err != nil {
+		return translate(fmt.Errorf("engine: create active segment %d: %w", plan.nextID, err))
+	}
+	// Sizes as registered, so the tail cut is already reflected.
+	e.diskBytes.Store(e.store.DiskBytes())
+	return nil
+}
+
+// planRecovery applies the startup naming rules (ARCHITECTURE §5.4 step 2)
+// to a directory listing. Non-data names such as LOCK are ignored; a
+// malformed data name fails, since TinyCask never writes one.
+func planRecovery(names []string) (recoveryPlan, error) {
+	var (
+		files      []storage.FileName
+		maxID      uint32
+		compactID  uint32
+		hasCompact bool
+	)
+	for _, base := range names {
+		name, ok, err := storage.ParseFileName(base)
+		if err != nil {
+			return recoveryPlan{}, err
+		}
+		if !ok {
+			continue
+		}
+		files = append(files, name)
+		maxID = max(maxID, name.ID)
+		if name.Kind == storage.KindCompact && (!hasCompact || name.ID > compactID) {
+			compactID, hasCompact = name.ID, true
+		}
+	}
+
+	plan := recoveryPlan{nextID: firstSegmentID}
+	if len(files) > 0 {
+		// Counting *.tmp too keeps IDs growing: a reserved ID is never reused.
+		if maxID == math.MaxUint32 {
+			return recoveryPlan{}, fmt.Errorf("file IDs exhausted at %d", maxID)
+		}
+		plan.nextID = maxID + 1
+	}
+	for _, f := range files {
+		if f.Kind == storage.KindCompactTmp || (hasCompact && f.ID < compactID) {
+			plan.remove = append(plan.remove, f)
+			continue
+		}
+		plan.replay = append(plan.replay, f)
+	}
+	// The listing is sorted by name, so compact_* comes before seg_*.
+	slices.SortFunc(plan.replay, func(a, b storage.FileName) int { return cmp.Compare(a.ID, b.ID) })
+	for i := 1; i < len(plan.replay); i++ {
+		if a, b := plan.replay[i-1], plan.replay[i]; a.ID == b.ID {
+			// The ID alone would not say which file a KeyDir entry means.
+			return recoveryPlan{}, fmt.Errorf("%w: %s and %s share file ID %d", ErrCorrupt, a, b, a.ID)
+		}
+	}
+	return plan, nil
+}
+
+// replayFile scans one file into KeyDir and liveBytes. It only reads.
+//
+// Corruption in the last (highest-ID) file is a torn tail: the records
+// before it count, and the returned tailCut says where to cut (invariant 9).
+// Corruption anywhere else fails with ErrCorrupt naming the file and offset.
+// An I/O error says nothing about the bytes, so it fails without a cut.
+func (e *Engine) replayFile(fsys vfs.FS, name storage.FileName, last bool) (*tailCut, error) {
+	path := filepath.Join(e.dir, name.String())
+	f, err := fsys.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("engine: recover: open %s: %w", path, err)
+	}
+	size, scanErr := f.Size()
+	var sc *storage.Scanner
+	if scanErr == nil {
+		sc = storage.NewScanner(f, size, storage.ScanOptions{Limits: e.limits})
+		scanErr = e.replayRecords(sc, name.ID)
+	}
+	// Only read so far, so a failed Close loses nothing; it is still reported.
+	if cerr := f.Close(); cerr != nil {
+		return nil, errors.Join(scanErr, fmt.Errorf("engine: recover: close %s: %w", path, cerr))
+	}
+	switch {
+	case scanErr == nil:
+		return nil, nil
+	case sc == nil:
+		return nil, fmt.Errorf("engine: recover: size of %s: %w", path, scanErr)
+	case !errors.Is(scanErr, storage.ErrCorrupt):
+		return nil, fmt.Errorf("engine: recover: scan %s: %w", path, scanErr)
+	case last:
+		return &tailCut{name: name, offset: sc.Offset(), size: size}, nil
+	default:
+		return nil, translate(fmt.Errorf("engine: recover: file %s is corrupt at offset %d: %w",
+			path, sc.Offset(), scanErr))
+	}
+}
+
+// replayRecords applies every record sc yields, in order: a PUT points the
+// key at this record, a tombstone removes it. It returns sc.Err().
+func (e *Engine) replayRecords(sc *storage.Scanner, fileID uint32) error {
+	for sc.Next() {
+		rec := sc.Record()
+		switch rec.Type {
+		case storage.TypePut:
+			// The codec bounded len(rec.Value) by MaxValueSize, a uint32.
+			valueSize := uint32(len(rec.Value))
+			prev, existed := e.keydir.Put(rec.Key, index.CommandIndex{
+				FileID:      fileID,
+				ValueSize:   valueSize,
+				ValueOffset: sc.ValueOffset(),
+				Timestamp:   rec.Timestamp,
+			})
+			e.liveBytes.Add(storage.RecordSize(len(rec.Key), valueSize) - e.entrySize(rec.Key, prev, existed))
+		case storage.TypeDelete:
+			prev, existed := e.keydir.Delete(rec.Key)
+			e.liveBytes.Add(-e.entrySize(rec.Key, prev, existed))
+		default:
+			// Decode rejects unknown types; reaching here is a codec bug.
+			return fmt.Errorf("%w: file %d offset %d: record type %d", ErrCorrupt, fileID, sc.RecordOffset(), rec.Type)
+		}
+	}
+	return sc.Err()
+}
+
+// removeStale deletes leftover *.tmp files and superseded data files, then
+// syncs the directory so the deletes are durable (invariant 7). Nothing is
+// synced when there was nothing to delete.
+func (e *Engine) removeStale(fsys vfs.FS, stale []storage.FileName) error {
+	if len(stale) == 0 {
+		return nil
+	}
+	for _, name := range stale {
+		path := filepath.Join(e.dir, name.String())
+		if err := fsys.Remove(path); err != nil {
+			return fmt.Errorf("engine: recover: remove %s: %w", path, err)
+		}
+	}
+	if err := fsys.SyncDir(e.dir); err != nil {
+		return fmt.Errorf("engine: recover: sync directory %s: %w", e.dir, err)
+	}
+	return nil
+}
+
+// repairTail cuts the highest-ID file back to its last valid record and
+// fsyncs it before anything is written after it (invariants 7 and 9). A
+// failed truncate or sync fails Open: the file's state is then unknown.
+func (e *Engine) repairTail(fsys vfs.FS, cut tailCut) error {
+	path := filepath.Join(e.dir, cut.name.String())
+	f, err := fsys.Open(path)
+	if err != nil {
+		return fmt.Errorf("engine: recover: open %s for repair: %w", path, err)
+	}
+	var werr error
+	if err = f.Truncate(cut.offset); err != nil {
+		werr = fmt.Errorf("engine: recover: truncate %s to %d: %w", path, cut.offset, err)
+	} else if err = f.Sync(); err != nil {
+		werr = fmt.Errorf("engine: recover: sync %s: %w", path, err)
+	}
+	if err = f.Close(); err != nil {
+		werr = errors.Join(werr, fmt.Errorf("engine: recover: close %s: %w", path, err))
+	}
+	if werr != nil {
+		return werr
+	}
+	e.opts.Logger.Warn("engine: truncated torn tail",
+		"file", path, "offset", cut.offset, "dropped_bytes", cut.size-cut.offset)
+	return nil
+}

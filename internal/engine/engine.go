@@ -51,11 +51,13 @@ type Engine struct {
 }
 
 // Open opens the engine on dir, creating the directory if needed. It takes
-// the directory's LOCK (ErrLocked if another engine holds it) and creates the
-// first active segment.
+// the directory's LOCK (ErrLocked if another engine holds it), replays the
+// existing data files to rebuild KeyDir (ARCHITECTURE §5.4) and creates a new
+// active segment above every existing file.
 //
-// Replaying existing data is T2.3: a directory that already holds data files
-// is rejected.
+// Corruption in any file but the highest-ID one fails with ErrCorrupt and
+// leaves the directory unchanged; a torn tail in the highest-ID file is cut
+// off and synced.
 func Open(fsys vfs.FS, dir string, opts Options) (*Engine, error) {
 	opts, err := opts.withDefaults()
 	if err != nil {
@@ -76,32 +78,10 @@ func Open(fsys vfs.FS, dir string, opts Options) (*Engine, error) {
 		store:  storage.NewStore(fsys, dir, storage.StoreOptions{Limits: opts.limits()}),
 		keydir: index.New(),
 	}
-	if err = e.start(fsys); err != nil {
+	if err = e.recover(fsys); err != nil {
 		return nil, errors.Join(err, e.store.Close(), e.releaseLock())
 	}
 	return e, nil
-}
-
-// start checks that dir holds no data files and creates the first active
-// segment. Called by Open before the engine is shared.
-func (e *Engine) start(fsys vfs.FS) error {
-	names, err := fsys.List(e.dir)
-	if err != nil {
-		return fmt.Errorf("engine: list %s: %w", e.dir, err)
-	}
-	for _, base := range names {
-		_, isData, perr := storage.ParseFileName(base)
-		if perr != nil {
-			return fmt.Errorf("engine: open %s: %w", e.dir, perr)
-		}
-		if isData {
-			return fmt.Errorf("engine: open %s (found %s): %w", e.dir, base, errRecoveryNotImplemented)
-		}
-	}
-	if err = e.store.CreateActive(firstSegmentID); err != nil {
-		return translate(fmt.Errorf("engine: create first segment: %w", err))
-	}
-	return nil
 }
 
 // Put stores value under key (ARCHITECTURE §5.1).

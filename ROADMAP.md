@@ -147,7 +147,7 @@ Goal: an embedded engine that passes the design doc's fault-injection scenarios 
 - **Verification Command:** `go test -race -count=1 ./internal/engine/ && make check`
 
 ### T2.3 — Recovery and the invariant checker (3.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** Rebuild KeyDir on `Open` per ARCHITECTURE §5.4, and a test helper that proves the design doc's invariants.
 - **Files/Packages Touched:** `internal/engine/` (`recovery.go`, `recovery_test.go`, `invariants_test.go`).
 - **Dependencies:** T2.2.

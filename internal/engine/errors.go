@@ -42,10 +42,6 @@ var ErrLocked = errors.New("engine: data directory is locked")
 // ErrCompactionRunning reports a compaction request while one is in progress.
 var ErrCompactionRunning = errors.New("engine: compaction already running")
 
-// errRecoveryNotImplemented is returned by Open on a directory that already
-// holds data files. T2.3 replaces it with replay (ARCHITECTURE §5.4).
-var errRecoveryNotImplemented = errors.New("engine: opening a non-empty directory is not implemented yet")
-
 // translate maps lower-layer sentinels to the engine's at the package
 // boundary (ARCHITECTURE §8). The original error stays in the chain.
 func translate(err error) error {

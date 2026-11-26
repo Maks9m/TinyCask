@@ -39,33 +39,20 @@ func TestOpen_SecondOpenReturnsErrLocked(t *testing.T) {
 	assert.Equal(t, []byte("v"), got)
 }
 
-func TestOpen_NonEmptyDirectory(t *testing.T) {
-	tests := []struct {
-		name    string
-		file    string
-		wantErr error
-	}{
-		{"segment", storage.SegmentName(7), errRecoveryNotImplemented},
-		{"compaction output", storage.CompactName(3), errRecoveryNotImplemented},
-		{"compaction tmp", storage.CompactTmpName(3), errRecoveryNotImplemented},
-		{"malformed data name", "seg_12.data", storage.ErrBadFileName},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fsys := simfs.New()
-			require.NoError(t, fsys.MkdirAll(testDir))
-			f, err := fsys.Create(filepath.Join(testDir, tc.file))
-			require.NoError(t, err)
-			require.NoError(t, f.Close())
+func TestOpen_MalformedDataFileName(t *testing.T) {
+	const file = "seg_12.data"
+	fsys := simfs.New()
+	require.NoError(t, fsys.MkdirAll(testDir))
+	f, err := fsys.Create(filepath.Join(testDir, file))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
 
-			_, err = Open(fsys, testDir, testOptions())
-			require.ErrorIs(t, err, tc.wantErr)
+	_, err = Open(fsys, testDir, testOptions())
+	require.ErrorIs(t, err, storage.ErrBadFileName)
 
-			requireLockFree(t, fsys, testDir)
-			assert.Equal(t, []string{lockFileName, tc.file}, mustList(t, fsys, testDir),
-				"a rejected Open must not create files")
-		})
-	}
+	requireLockFree(t, fsys, testDir)
+	assert.Equal(t, []string{lockFileName, file}, mustList(t, fsys, testDir),
+		"a rejected Open must not create files")
 }
 
 func TestOpen_IgnoresUnknownFiles(t *testing.T) {

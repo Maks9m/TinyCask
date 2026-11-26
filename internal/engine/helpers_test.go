@@ -100,6 +100,8 @@ type fsOp string
 
 const (
 	opCreate   fsOp = "create"
+	opOpen     fsOp = "open"
+	opRemove   fsOp = "remove"
 	opList     fsOp = "list"
 	opSyncDir  fsOp = "syncdir"
 	opWrite    fsOp = "write"
@@ -152,6 +154,24 @@ func (f *faultFS) Create(name string) (vfs.File, error) {
 		return nil, err
 	}
 	return &faultFile{File: file, fs: f}, nil
+}
+
+func (f *faultFS) Open(name string) (vfs.File, error) {
+	if flt, ok := f.take(opOpen); ok {
+		return nil, flt.err
+	}
+	file, err := f.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &faultFile{File: file, fs: f}, nil
+}
+
+func (f *faultFS) Remove(name string) error {
+	if flt, ok := f.take(opRemove); ok {
+		return flt.err
+	}
+	return f.FS.Remove(name)
 }
 
 func (f *faultFS) List(dir string) ([]string, error) {

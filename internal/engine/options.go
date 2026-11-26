@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/Maks9m/TinyCask/internal/storage"
@@ -23,6 +24,9 @@ type Options struct {
 	// Now is the clock used for record timestamps (default time.Now).
 	// Timestamps are informational; tests inject a fixed clock.
 	Now func() time.Time
+	// Logger receives warnings, such as a torn tail cut off during recovery
+	// (default: discard). The engine never uses the global logger.
+	Logger *slog.Logger
 }
 
 // withDefaults fills zero fields and rejects impossible values.
@@ -41,6 +45,9 @@ func (o Options) withDefaults() (Options, error) {
 	}
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.DiscardHandler)
 	}
 	return o, nil
 }
