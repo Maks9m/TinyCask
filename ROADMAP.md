@@ -48,7 +48,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 - **Verification Command:** `make check && go run ./cmd/tinycask -version`
 
 ### T1.2 — VFS interfaces and OSFS (2.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** The file-system abstraction from ARCHITECTURE §11 with a real-disk implementation and a reusable conformance suite.
 - **Files/Packages Touched:** `internal/vfs/` (`vfs.go`, `errors.go`, `osfs.go`, `osfs_unix.go`, `vfstest/suite.go`, tests).
 - **Dependencies:** T1.1.
