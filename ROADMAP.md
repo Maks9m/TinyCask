@@ -132,7 +132,7 @@ Goal: an embedded engine that passes the design doc's fault-injection scenarios 
 - **Verification Command:** `go test -race -count=1 ./internal/vfs/... && make check`
 
 ### T2.2 — Engine: open, put, get, delete, close (3 h)
-- [ ] Done
+- [x] Done
 - **Goal:** The façade from ARCHITECTURE §5.1–5.3, §5.6 and §10 working on an empty directory.
 - **Files/Packages Touched:** `internal/engine/` (`engine.go`, `options.go`, `errors.go`, `stats.go`, tests).
 - **Dependencies:** T1.4, T1.6, T2.1.
