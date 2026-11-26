@@ -189,9 +189,8 @@ func TestFault_CloseSyncFailure(t *testing.T) {
 	require.ErrorIs(t, err, ErrClosed)
 }
 
-// TestCrash_PartialWrite is design-doc scenario 1: a Put torn part-way
-// through its record, then a restart. The torn record must vanish and every
-// earlier acknowledged write must survive.
+// TestCrash_PartialWrite (design-doc scenario 1): a torn Put then restart. The
+// torn record vanishes; every earlier acked write survives.
 func TestCrash_PartialWrite(t *testing.T) {
 	const tornKey = "torn"
 	tornValue := strings.Repeat("t", 100)
@@ -293,9 +292,8 @@ func TestFault_NoSpace(t *testing.T) {
 	h.check(t, reopen(t, fsys, testDir, opts))
 }
 
-// TestCrash_PowerLoss restarts with every unsynced byte dropped. sync=always
-// must lose no acknowledged write; sync=never may lose a suffix of the
-// history but must recover exactly some prefix of it.
+// TestCrash_PowerLoss drops unsynced bytes on restart. sync=always loses no
+// acked write; sync=never may lose a suffix but recovers an exact prefix.
 func TestCrash_PowerLoss(t *testing.T) {
 	t.Run("sync=always keeps every acknowledged write", func(t *testing.T) {
 		fsys := simfs.New()

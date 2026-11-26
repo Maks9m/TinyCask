@@ -12,8 +12,7 @@ import (
 	"github.com/Maks9m/TinyCask/internal/vfs"
 )
 
-// Errors for cases where OSFS would surface an errno that has no portable
-// fs.Err* equivalent. Callers only need to know that the call failed.
+// Errors where OSFS would return an errno with no portable fs.Err* equivalent.
 var (
 	errIsDir          = errors.New("simfs: is a directory")
 	errNotDir         = errors.New("simfs: not a directory")
@@ -24,28 +23,26 @@ var (
 )
 
 // SimFS is an in-memory vfs.FS that behaves like OSFS: names map to inodes,
-// open handles follow the inode across Rename and Remove, reads see unsynced
-// bytes, and each file tracks how much of it Sync has made durable.
+// handles survive Rename/Remove, reads see unsynced bytes, and each file
+// tracks its synced length.
 //
-// Create one with New. It is safe for concurrent use and deterministic: it
-// reads no clock and draws no random numbers. Namespace operations (create,
-// rename, remove, mkdir) are durable as soon as they return, a documented
-// simplification (ARCHITECTURE §11), so SyncDir only checks that dir exists.
+// Safe for concurrent use and deterministic (no clock, no randomness).
+// Namespace ops are durable at once, a documented simplification
+// (ARCHITECTURE §11), so SyncDir only checks that dir exists.
 type SimFS struct {
-	// mu guards both maps and the mutable state of every inode, file handle
-	// and lock handle. One lock gives every operation a single global order,
-	// which fault injection (faults.go) relies on (for example "the Nth write").
+	// mu guards the maps and all inode/handle state. One lock gives all calls
+	// a global order, which fault injection relies on ("the Nth write").
 	mu    sync.Mutex
 	files map[string]*inode   // cleaned path → file
-	dirs  map[string]struct{} // cleaned paths made by MkdirAll; roots are implicit
-	flt   faults              // armed faults, crash state and handle generation (faults.go)
+	dirs  map[string]struct{} // dirs made by MkdirAll; roots are implicit
+	flt   faults              // faults, crash state, handle generation
 }
 
-// inode is one file's contents, shared by every handle opened on it.
+// inode is one file's contents, shared by all handles on it.
 type inode struct {
 	data   []byte
-	synced int64 // length of the prefix of data that the last Sync made durable
-	locked bool  // held by a handle returned from Lock
+	synced int64 // durable prefix length after the last Sync
+	locked bool
 }
 
 var _ vfs.FS = (*SimFS)(nil)
@@ -122,9 +119,8 @@ func (s *SimFS) Remove(name string) error {
 	return nil
 }
 
-// Rename atomically moves the file oldName to newName, replacing any file
-// there. Open handles keep working. Renaming directories is not supported:
-// TinyCask never does it.
+// Rename atomically moves file oldName to newName, replacing it. Open handles
+// keep working. Directories can't be renamed (TinyCask never does).
 func (s *SimFS) Rename(oldName, newName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -153,7 +149,7 @@ func (s *SimFS) Rename(oldName, newName string) error {
 	return nil
 }
 
-// List returns the sorted base names of the files and directories in dir.
+// List returns the sorted base names in dir.
 func (s *SimFS) List(dir string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -204,9 +200,8 @@ func (s *SimFS) SyncDir(dir string) error {
 	return nil
 }
 
-// Lock takes an exclusive lock on the file name, creating it if needed, and
-// returns vfs.ErrLocked if any handle holds it. As with flock in OSFS the lock
-// belongs to the inode: closing the result releases it and leaves the file.
+// Lock takes an exclusive lock on name, creating it if needed (vfs.ErrLocked
+// if held). Like flock, the lock belongs to the inode; Close releases it.
 func (s *SimFS) Lock(name string) (io.Closer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -232,10 +227,8 @@ func (s *SimFS) Lock(name string) (io.Closer, error) {
 	return &lockHandle{fs: s, name: name, ino: ino, gen: s.flt.gen}, nil
 }
 
-// SyncedSize reports how many leading bytes of the file name the last Sync
-// made durable. It lets tests check the synced length that a simulated power
-// loss will cut the file back to. Like the fault controls, it works while the
-// FS is crashed.
+// SyncedSize returns name's synced length, i.e. what a power loss would keep.
+// Works while crashed, like the fault controls.
 func (s *SimFS) SyncedSize(name string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -246,8 +239,7 @@ func (s *SimFS) SyncedSize(name string) (int64, error) {
 	return ino.synced, nil
 }
 
-// isDir reports whether p is a directory. The roots "/" and "." always exist.
-// Caller holds s.mu.
+// isDir reports whether p is a dir ("/" and "." always are). Caller holds s.mu.
 func (s *SimFS) isDir(p string) bool {
 	if p == "/" || p == "." {
 		return true

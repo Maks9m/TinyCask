@@ -14,9 +14,8 @@ type Stats struct {
 	ReadOnly bool
 }
 
-// Stats returns the current counters. It works after Close too, returning
-// the final values. The fields are read without the writer lock, so under
-// concurrent writes they may be a few records apart from each other.
+// Stats returns the current counters (final values after Close). Read without
+// the writer lock, so under load fields may be a few records apart.
 func (e *Engine) Stats() Stats {
 	live := e.liveBytes.Load()
 	disk := e.diskBytes.Load()

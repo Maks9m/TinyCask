@@ -6,25 +6,21 @@ import (
 	"time"
 )
 
-// SyncPolicy chooses when appended records are fsynced (ARCHITECTURE §7).
-// Whatever the policy, a segment is fsynced before it is sealed and on Close.
+// SyncPolicy chooses when appends are fsynced (ARCHITECTURE §7). Segments are
+// always fsynced before sealing and on Close.
 type SyncPolicy uint8
 
 const (
-	// SyncInterval fsyncs the active segment from a background ticker every
-	// Options.SyncInterval. A power loss loses at most about one interval.
-	// It is the zero value and the default.
+	// SyncInterval (default) fsyncs from a background ticker; a power loss
+	// loses at most about one interval.
 	SyncInterval SyncPolicy = iota
-	// SyncAlways fsyncs after every append, before Put or Delete returns.
-	// An acknowledged write survives a power loss.
+	// SyncAlways fsyncs before Put/Delete returns; acked writes survive power loss.
 	SyncAlways
-	// SyncNever fsyncs only on roll and Close; what a power loss keeps is up
-	// to the OS.
+	// SyncNever fsyncs only on roll and Close; the rest is up to the OS.
 	SyncNever
 )
 
-// DefaultSyncInterval is the default fsync period for SyncInterval
-// (ARCHITECTURE §12).
+// DefaultSyncInterval is the default fsync period (ARCHITECTURE §12).
 const DefaultSyncInterval = time.Second
 
 // String returns the policy's flag spelling.
@@ -40,19 +36,17 @@ func (p SyncPolicy) String() string {
 	return fmt.Sprintf("SyncPolicy(%d)", uint8(p))
 }
 
-// tickerFunc starts a ticker of period d and returns its channel and a func
-// that stops it. Tests inject one they drive by hand, so no test sleeps.
+// tickerFunc starts a ticker and returns its channel and stop func. Injectable
+// so tests drive ticks by hand instead of sleeping.
 type tickerFunc func(d time.Duration) (ticks <-chan time.Time, stop func())
 
-// realTicker is the production tickerFunc.
 func realTicker(d time.Duration) (<-chan time.Time, func()) {
 	t := time.NewTicker(d)
 	return t.C, t.Stop
 }
 
-// startBackground starts the goroutines the options ask for (ARCHITECTURE
-// §5.4 step 6). Each is owned by the engine: Close cancels bgCancel and
-// waits on bg (invariant 11).
+// startBackground starts background goroutines (ARCHITECTURE §5.4 step 6).
+// Close cancels and waits for them (invariant 11).
 func (e *Engine) startBackground() {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.bgCancel = cancel
@@ -62,9 +56,8 @@ func (e *Engine) startBackground() {
 	}
 }
 
-// stopBackground cancels the background goroutines and waits for them. It
-// must be called without e.mu, which a goroutine may be waiting for. Safe to
-// call more than once and from concurrent Close calls.
+// stopBackground cancels and waits for the goroutines. Call without e.mu (a
+// goroutine may be waiting for it). Safe to call repeatedly.
 func (e *Engine) stopBackground() {
 	if e.bgCancel != nil {
 		e.bgCancel()
@@ -86,10 +79,9 @@ func (e *Engine) syncLoop(ctx context.Context, ticks <-chan time.Time, stop func
 	}
 }
 
-// syncTick checks under the writer lock that a sync is useful, then fsyncs
-// outside it so writers are not stalled by the disk (ARCHITECTURE §6). A
-// failed fsync is never retried: the engine goes read-only (invariant 8).
-// The error has no caller to return to, so it is logged here, once.
+// syncTick fsyncs outside the writer lock so writers aren't stalled by disk
+// (ARCHITECTURE §6). Failure → read-only, no retry (invariant 8). No caller to
+// return to, so the error is logged here.
 func (e *Engine) syncTick() {
 	if !e.writable() {
 		return
@@ -102,16 +94,15 @@ func (e *Engine) syncTick() {
 	}
 }
 
-// writable reports, under the writer lock, whether the engine takes writes.
-// It holds e.mu only for the flag check, never across I/O.
+// writable checks the flags under e.mu, never held across I/O.
 func (e *Engine) writable() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.writableLocked() == nil
 }
 
-// syncAfterAppendLocked applies SyncAlways after a successful append. A
-// failure switches the engine to read-only (invariant 8). e.mu must be held.
+// syncAfterAppendLocked applies SyncAlways; failure → read-only (invariant 8).
+// e.mu must be held.
 func (e *Engine) syncAfterAppendLocked() error {
 	if e.opts.Sync != SyncAlways {
 		return nil

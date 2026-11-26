@@ -17,17 +17,15 @@ import (
 )
 
 const (
-	// lockFileName is the advisory lock held for the engine's lifetime.
-	lockFileName = "LOCK"
-	// firstSegmentID is the active segment's ID in an empty directory.
-	firstSegmentID uint32 = 1
-	// maxGetAttempts bounds Get's retries when a compaction drops the file
-	// between the KeyDir lookup and the read (ARCHITECTURE §5.2).
+	lockFileName          = "LOCK" // held for the engine's lifetime
+	firstSegmentID uint32 = 1      // active segment ID in an empty dir
+	// maxGetAttempts bounds Get retries when a compaction drops the file
+	// between lookup and read (ARCHITECTURE §5.2).
 	maxGetAttempts = 3
 )
 
-// Engine is the embedded key-value store (ARCHITECTURE §10). All methods are
-// safe for concurrent use. It never retains the caller's key or value slices.
+// Engine is the embedded key-value store (ARCHITECTURE §10). Safe for
+// concurrent use; never retains the caller's slices.
 type Engine struct {
 	dir    string
 	opts   Options
@@ -39,32 +37,27 @@ type Engine struct {
 	closed   atomic.Bool // one-way; set under mu
 	readOnly atomic.Bool // one-way (invariant 8)
 
-	// liveBytes is the total size of the records KeyDir points at; it moves
-	// only next to a KeyDir change. diskBytes is the total size of all data
-	// files; it moves only next to an append. Both are written under mu.
+	// liveBytes: size of records KeyDir points at (changes with KeyDir).
+	// diskBytes: size of all data files (changes with appends). Written under mu.
 	liveBytes atomic.Int64
 	diskBytes atomic.Int64
 
-	// bgCancel stops the background goroutines (the interval fsync ticker)
-	// and bg waits for them (invariant 11). Both are set by Open before the
-	// engine is shared and only used by Close afterwards.
+	// bgCancel stops the sync ticker goroutine; bg waits for it (invariant 11).
+	// Set by Open, used only by Close.
 	bgCancel context.CancelFunc
 	bg       sync.WaitGroup
 
-	// mu is the writer lock (invariant 2). It covers each append together
-	// with its KeyDir update and counters, rolls, the read-only transition
-	// and Close. Lock order: mu → KeyDir → Store (invariant 3).
+	// mu is the writer lock (invariant 2): append + KeyDir update + counters,
+	// rolls, read-only switch, Close. Order: mu → KeyDir → Store (invariant 3).
 	mu sync.Mutex
 }
 
-// Open opens the engine on dir, creating the directory if needed. It takes
-// the directory's LOCK (ErrLocked if another engine holds it), replays the
-// existing data files to rebuild KeyDir (ARCHITECTURE §5.4) and creates a new
-// active segment above every existing file.
+// Open opens the engine on dir (created if needed): takes LOCK (ErrLocked if
+// held), replays data files into KeyDir (ARCHITECTURE §5.4) and creates a new
+// active segment.
 //
-// Corruption in any file but the highest-ID one fails with ErrCorrupt and
-// leaves the directory unchanged; a torn tail in the highest-ID file is cut
-// off and synced.
+// Corruption outside the highest-ID file fails with ErrCorrupt and changes
+// nothing; a torn tail in the highest-ID file is cut and synced.
 func Open(fsys vfs.FS, dir string, opts Options) (*Engine, error) {
 	opts, err := opts.withDefaults()
 	if err != nil {
@@ -94,8 +87,7 @@ func Open(fsys vfs.FS, dir string, opts Options) (*Engine, error) {
 
 // Put stores value under key (ARCHITECTURE §5.1).
 func (e *Engine) Put(key, value []byte) error {
-	// Checked first so a closed engine reports ErrClosed for any input;
-	// writableLocked re-checks under the lock to cover a racing Close.
+	// Fast path; writableLocked re-checks under the lock for a racing Close.
 	if e.closed.Load() {
 		return ErrClosed
 	}
@@ -117,8 +109,7 @@ func (e *Engine) Put(key, value []byte) error {
 	if err != nil {
 		return err
 	}
-	// The codec bounded len(value) by MaxValueSize, a uint32.
-	valueSize := uint32(len(value))
+	valueSize := uint32(len(value)) // safe: bounded by MaxValueSize
 	prev, existed := e.keydir.Put(key, index.CommandIndex{
 		FileID:      fileID,
 		ValueSize:   valueSize,
@@ -129,8 +120,8 @@ func (e *Engine) Put(key, value []byte) error {
 	return nil
 }
 
-// Get returns a copy of the value stored under key, or ErrKeyNotFound
-// (ARCHITECTURE §5.2). It never takes the writer lock.
+// Get returns a copy of key's value or ErrKeyNotFound (ARCHITECTURE §5.2),
+// without the writer lock.
 func (e *Engine) Get(key []byte) ([]byte, error) {
 	if e.closed.Load() {
 		return nil, ErrClosed
@@ -155,8 +146,7 @@ func (e *Engine) Get(key []byte) ([]byte, error) {
 	return nil, fmt.Errorf("engine: get: file kept disappearing after %d attempts: %w", maxGetAttempts, lastErr)
 }
 
-// readValue reads and verifies the record entry points at, with one ReadAt
-// and no KeyDir lock held.
+// readValue reads and verifies entry's record with one ReadAt, no KeyDir lock.
 func (e *Engine) readValue(key []byte, entry index.CommandIndex) ([]byte, error) {
 	off := storage.RecordOffset(entry.ValueOffset, len(key))
 	buf, err := e.store.ReadAt(entry.FileID, off, storage.RecordSize(len(key), entry.ValueSize))
@@ -174,12 +164,12 @@ func (e *Engine) readValue(key []byte, entry index.CommandIndex) ([]byte, error)
 		return nil, fmt.Errorf("%w: file %d offset %d holds a different record than KeyDir expects",
 			ErrCorrupt, entry.FileID, off)
 	}
-	// Clone so the caller owns exactly the value, not the whole frame.
+	// Clone so the caller owns just the value, not the whole frame.
 	return bytes.Clone(rec.Value), nil
 }
 
-// Delete removes key by appending a tombstone (ARCHITECTURE §5.3). A missing
-// key returns ErrKeyNotFound and writes nothing.
+// Delete appends a tombstone for key (ARCHITECTURE §5.3). A missing key gives
+// ErrKeyNotFound and writes nothing.
 func (e *Engine) Delete(key []byte) error {
 	if e.closed.Load() {
 		return ErrClosed
@@ -197,8 +187,7 @@ func (e *Engine) Delete(key []byte) error {
 	if err = e.writableLocked(); err != nil {
 		return err
 	}
-	// Checked under the writer lock, so no Put or Delete can slip in between
-	// this lookup and the tombstone.
+	// Under the writer lock, so nothing slips in before the tombstone.
 	if _, ok := e.keydir.Get(key); !ok {
 		return ErrKeyNotFound
 	}
@@ -210,10 +199,9 @@ func (e *Engine) Delete(key []byte) error {
 	return nil
 }
 
-// Close stops the background goroutines, syncs the active segment, closes
-// every file and releases LOCK (ARCHITECTURE §5.6). It is idempotent; every
-// other method then returns ErrClosed. The engine is closed even if Close
-// returns an error.
+// Close stops background work, syncs, closes files and releases LOCK
+// (ARCHITECTURE §5.6). Idempotent; the engine is closed even on error, and
+// other methods then return ErrClosed.
 func (e *Engine) Close() error {
 	// Before taking mu: a background sync may be waiting for it.
 	e.stopBackground()
@@ -229,11 +217,9 @@ func (e *Engine) Close() error {
 	return errors.Join(serr, e.releaseLock())
 }
 
-// appendLocked rolls if needed, appends frame and applies SyncAlways,
-// keeping diskBytes next to the append. A failed append was truncated away
-// by the Store; a failed truncate or fsync makes the engine read-only
-// (invariant 8). On any error the caller must leave KeyDir alone. e.mu must
-// be held.
+// appendLocked rolls if needed, appends, updates diskBytes and applies
+// SyncAlways. Failed truncate/fsync → read-only (invariant 8). On error the
+// caller must not touch KeyDir. e.mu must be held.
 func (e *Engine) appendLocked(frame []byte) (fileID uint32, off int64, err error) {
 	if err = e.writableLocked(); err != nil {
 		return 0, 0, err
@@ -245,8 +231,8 @@ func (e *Engine) appendLocked(frame []byte) (fileID uint32, off int64, err error
 	if err != nil {
 		return 0, 0, e.fail(fmt.Errorf("engine: append: %w", err))
 	}
-	// The frame is in the file now, even if the fsync below fails; a Put
-	// that then returns an error may still reappear after recovery.
+	// The frame is on file even if the fsync fails, so a failed Put may
+	// still reappear after recovery.
 	e.diskBytes.Add(int64(len(frame)))
 	if err = e.syncAfterAppendLocked(); err != nil {
 		return 0, 0, err
@@ -254,9 +240,8 @@ func (e *Engine) appendLocked(frame []byte) (fileID uint32, off int64, err error
 	return fileID, off, nil
 }
 
-// maybeRollLocked seals the active segment if n more bytes would push it past
-// MaxSegmentSize. An empty segment is never rolled, so a record larger than
-// the threshold lands alone in a fresh segment. e.mu must be held.
+// maybeRollLocked rolls if n more bytes would pass MaxSegmentSize. Empty
+// segments never roll, so an oversized record lands alone. e.mu must be held.
 func (e *Engine) maybeRollLocked(n int64) error {
 	id, size, ok := e.store.Active()
 	if !ok {
@@ -271,8 +256,7 @@ func (e *Engine) maybeRollLocked(n int64) error {
 	return e.store.Roll(id + 1)
 }
 
-// writableLocked returns why the engine cannot take a write, or nil.
-// e.mu must be held, so the flags cannot change underneath a write.
+// writableLocked returns why writes are refused, or nil. e.mu must be held.
 func (e *Engine) writableLocked() error {
 	if e.closed.Load() {
 		return ErrClosed
@@ -283,8 +267,8 @@ func (e *Engine) writableLocked() error {
 	return nil
 }
 
-// fail switches to read-only if the Store reports a damaged segment
-// (invariant 8) and translates err. e.mu must be held.
+// fail goes read-only on a damaged segment (invariant 8) and translates err.
+// e.mu must be held.
 func (e *Engine) fail(err error) error {
 	if errors.Is(err, storage.ErrSegmentDamaged) {
 		e.readOnly.Store(true)
@@ -292,7 +276,6 @@ func (e *Engine) fail(err error) error {
 	return translate(err)
 }
 
-// checkKey enforces the key limits before any work is done.
 func (e *Engine) checkKey(key []byte) error {
 	switch {
 	case len(key) < storage.MinKeySize:
@@ -303,8 +286,8 @@ func (e *Engine) checkKey(key []byte) error {
 	return nil
 }
 
-// encode builds the frame outside the writer lock. Sizes were checked
-// already, so a codec error here is a bug, reported rather than hidden.
+// encode builds the frame outside the writer lock. Sizes are pre-checked, so
+// an error here is a bug.
 func (e *Engine) encode(r storage.Record) ([]byte, error) {
 	frame, err := storage.Encode(r, e.limits)
 	if err != nil {
@@ -313,7 +296,7 @@ func (e *Engine) encode(r storage.Record) ([]byte, error) {
 	return frame, nil
 }
 
-// entrySize is the record size of a KeyDir entry, or 0 if there was none.
+// entrySize is an entry's record size, or 0 if !ok.
 func (e *Engine) entrySize(key []byte, entry index.CommandIndex, ok bool) int64 {
 	if !ok {
 		return 0
@@ -321,8 +304,8 @@ func (e *Engine) entrySize(key []byte, entry index.CommandIndex, ok bool) int64 
 	return storage.RecordSize(len(key), entry.ValueSize)
 }
 
-// timestamp returns the clock as Unix nanoseconds. It is informational only
-// (invariant 4), so a pre-1970 clock wrapping around is harmless.
+// timestamp returns Unix ns. Informational only (invariant 4), so a pre-1970
+// wraparound is harmless.
 func (e *Engine) timestamp() uint64 {
 	return uint64(e.opts.Now().UnixNano())
 }

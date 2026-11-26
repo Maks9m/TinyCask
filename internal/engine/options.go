@@ -13,30 +13,26 @@ const DefaultMaxSegmentSize int64 = 64 << 20
 
 // Options configures an Engine. The zero value uses the defaults.
 type Options struct {
-	// MaxSegmentSize is the roll threshold in bytes: an append that would
-	// push the active segment past it goes to a new segment. A record larger
-	// than the threshold is still accepted, alone in its own segment.
+	// MaxSegmentSize is the roll threshold. A bigger record still fits, alone
+	// in its own segment.
 	MaxSegmentSize int64
 	// MaxKeySize is the key limit in bytes (default 1 KiB).
 	MaxKeySize uint32
 	// MaxValueSize is the value limit in bytes (default 1 MiB).
 	MaxValueSize uint32
-	// Now is the clock used for record timestamps (default time.Now).
-	// Timestamps are informational; tests inject a fixed clock.
+	// Now is the timestamp clock (default time.Now); tests inject a fixed one.
 	Now func() time.Time
-	// Logger receives warnings, such as a torn tail cut off during recovery
-	// (default: discard). The engine never uses the global logger.
+	// Logger gets warnings such as a cut torn tail (default: discard). The
+	// global logger is never used.
 	Logger *slog.Logger
 	// Sync chooses when appends are fsynced (default SyncInterval).
 	Sync SyncPolicy
 	// SyncInterval is the fsync period for SyncInterval (default 1 s).
 	SyncInterval time.Duration
 
-	// newTicker starts the SyncInterval ticker (default realTicker). Tests
-	// set it to a channel they drive by hand.
+	// newTicker starts the sync ticker; tests swap in a hand-driven channel.
 	newTicker tickerFunc
-	// afterTick runs after each interval tick is fully handled (default: do
-	// nothing). Tests use it to wait for a sync without sleeping.
+	// afterTick runs after each tick; tests use it to wait without sleeping.
 	afterTick func()
 }
 
@@ -78,7 +74,6 @@ func (o Options) withDefaults() (Options, error) {
 	return o, nil
 }
 
-// limits returns the record limits shared with the codec and the Store.
 func (o Options) limits() storage.Limits {
 	return storage.Limits{MaxKeySize: o.MaxKeySize, MaxValueSize: o.MaxValueSize}
 }
