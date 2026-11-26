@@ -162,7 +162,7 @@ Goal: an embedded engine that passes the design doc's fault-injection scenarios 
 - **Verification Command:** `go test -race -count=1 -run 'Recover|Reopen|Invariant' ./internal/engine/ && make check`
 
 ### T2.4 — SimFS fault injection (3 h)
-- [ ] Done
+- [x] Done
 - **Goal:** The four deterministic faults from ARCHITECTURE §11.
 - **Files/Packages Touched:** `internal/vfs/simfs/` (`faults.go`, tests).
 - **Dependencies:** T2.1.

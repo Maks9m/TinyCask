@@ -344,9 +344,11 @@ func open(t testing.TB, s *simfs.SimFS, name string) vfs.File {
 	return f
 }
 
+// closeFile closes f at cleanup. A handle the test already closed, or one a
+// crash or Restart killed, is fine.
 func closeFile(t testing.TB, f vfs.File) {
 	t.Helper()
-	if err := f.Close(); err != nil && !errors.Is(err, fs.ErrClosed) {
+	if err := f.Close(); err != nil && !errors.Is(err, fs.ErrClosed) && !errors.Is(err, simfs.ErrCrashed) {
 		t.Errorf("close: %v", err)
 	}
 }

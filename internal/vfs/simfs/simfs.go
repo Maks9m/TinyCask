@@ -34,10 +34,11 @@ var (
 type SimFS struct {
 	// mu guards both maps and the mutable state of every inode, file handle
 	// and lock handle. One lock gives every operation a single global order,
-	// which the fault injection of T2.4 relies on (for example "the Nth write").
+	// which fault injection (faults.go) relies on (for example "the Nth write").
 	mu    sync.Mutex
 	files map[string]*inode   // cleaned path → file
 	dirs  map[string]struct{} // cleaned paths made by MkdirAll; roots are implicit
+	flt   faults              // armed faults, crash state and handle generation (faults.go)
 }
 
 // inode is one file's contents, shared by every handle opened on it.
@@ -54,6 +55,7 @@ func New() *SimFS {
 	return &SimFS{
 		files: make(map[string]*inode),
 		dirs:  make(map[string]struct{}),
+		flt:   faults{nth: make(map[Op]nthFault), quota: NoQuota},
 	}
 }
 
@@ -61,6 +63,12 @@ func New() *SimFS {
 func (s *SimFS) Create(name string) (vfs.File, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.alive(); err != nil {
+		return nil, pathErr("open", name, err)
+	}
+	if err := s.inject(OpCreate); err != nil {
+		return nil, pathErr("open", name, err)
+	}
 	p := filepath.Clean(name)
 	if s.isDir(p) || s.files[p] != nil {
 		return nil, pathErr("open", name, fs.ErrExist)
@@ -70,24 +78,33 @@ func (s *SimFS) Create(name string) (vfs.File, error) {
 	}
 	ino := &inode{}
 	s.files[p] = ino
-	return &file{fs: s, name: name, ino: ino}, nil
+	return &file{fs: s, name: name, ino: ino, gen: s.flt.gen}, nil
 }
 
 // Open opens an existing file; fs.ErrNotExist if missing.
 func (s *SimFS) Open(name string) (vfs.File, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.alive(); err != nil {
+		return nil, pathErr("open", name, err)
+	}
 	ino, err := s.lookupFile(filepath.Clean(name))
 	if err != nil {
 		return nil, pathErr("open", name, err)
 	}
-	return &file{fs: s, name: name, ino: ino}, nil
+	return &file{fs: s, name: name, ino: ino, gen: s.flt.gen}, nil
 }
 
 // Remove deletes a file or an empty directory. Open handles keep working.
 func (s *SimFS) Remove(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.alive(); err != nil {
+		return pathErr("remove", name, err)
+	}
+	if err := s.inject(OpRemove); err != nil {
+		return pathErr("remove", name, err)
+	}
 	p := filepath.Clean(name)
 	switch {
 	case s.files[p] != nil:
@@ -111,6 +128,12 @@ func (s *SimFS) Remove(name string) error {
 func (s *SimFS) Rename(oldName, newName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.alive(); err != nil {
+		return pathErr("rename", oldName, err)
+	}
+	if err := s.inject(OpRename); err != nil {
+		return pathErr("rename", oldName, err)
+	}
 	oldP, newP := filepath.Clean(oldName), filepath.Clean(newName)
 	ino, err := s.lookupFile(oldP)
 	if err != nil {
@@ -134,6 +157,9 @@ func (s *SimFS) Rename(oldName, newName string) error {
 func (s *SimFS) List(dir string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.alive(); err != nil {
+		return nil, pathErr("readdir", dir, err)
+	}
 	p := filepath.Clean(dir)
 	if err := s.checkDir(p); err != nil {
 		return nil, pathErr("readdir", dir, err)
@@ -147,6 +173,9 @@ func (s *SimFS) List(dir string) ([]string, error) {
 func (s *SimFS) MkdirAll(dir string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.alive(); err != nil {
+		return pathErr("mkdir", dir, err)
+	}
 	p := filepath.Clean(dir)
 	var missing []string
 	for !s.isDir(p) {
@@ -166,6 +195,9 @@ func (s *SimFS) MkdirAll(dir string) error {
 func (s *SimFS) SyncDir(dir string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.alive(); err != nil {
+		return pathErr("sync", dir, err)
+	}
 	if err := s.checkDir(filepath.Clean(dir)); err != nil {
 		return pathErr("sync", dir, err)
 	}
@@ -178,6 +210,9 @@ func (s *SimFS) SyncDir(dir string) error {
 func (s *SimFS) Lock(name string) (io.Closer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.alive(); err != nil {
+		return nil, pathErr("open", name, err)
+	}
 	p := filepath.Clean(name)
 	if s.isDir(p) {
 		return nil, pathErr("open", name, errIsDir)
@@ -194,12 +229,13 @@ func (s *SimFS) Lock(name string) (io.Closer, error) {
 		return nil, fmt.Errorf("simfs: lock %s: %w", name, vfs.ErrLocked)
 	}
 	ino.locked = true
-	return &lockHandle{fs: s, name: name, ino: ino}, nil
+	return &lockHandle{fs: s, name: name, ino: ino, gen: s.flt.gen}, nil
 }
 
 // SyncedSize reports how many leading bytes of the file name the last Sync
 // made durable. It lets tests check the synced length that a simulated power
-// loss will cut the file back to.
+// loss will cut the file back to. Like the fault controls, it works while the
+// FS is crashed.
 func (s *SimFS) SyncedSize(name string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
