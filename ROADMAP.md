@@ -86,7 +86,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 - **Verification Command:** `go test -race -count=1 ./internal/index/ && go test -run '^$' -bench KeyDir -benchtime 1x ./internal/index/ && make check`
 
 ### T1.5 — Segments and the segment set (3.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** Append to an active segment, read from any segment, roll, and manage the set of open files.
 - **Files/Packages Touched:** `internal/storage/` (`names.go`, `segment.go`, `store.go`, tests).
 - **Dependencies:** T1.2, T1.3.
