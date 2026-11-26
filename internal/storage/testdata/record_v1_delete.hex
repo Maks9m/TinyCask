@@ -1,0 +1,11 @@
+# Record format v1 golden bytes (ARCHITECTURE §3.1). FROZEN: never regenerate
+# this file to make a test pass; a mismatch means the on-disk format changed.
+# Computed independently of the Go codec (Python zlib.crc32 + struct.pack).
+#
+# DELETE (tombstone)  timestamp=1700000000987654321  key="user"  (25 bytes)
+8d 79 f7 72                # CRC32-IEEE of every byte below
+b1 68 08 71 fe 9c 97 17    # Timestamp, uint64 LE
+02                         # Type = DELETE
+04 00 00 00                # KeySize = 4, uint32 LE
+00 00 00 00                # ValSize = 0 (required for a tombstone)
+75 73 65 72                # Key "user"

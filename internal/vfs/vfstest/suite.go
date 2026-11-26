@@ -215,7 +215,7 @@ func testTruncateKeepsFile(t *testing.T, fsys vfs.FS, dir string) {
 
 	require.NoError(t, f.Truncate(0))
 	assertSize(t, f, 0)
-	assertList(t, fsys, dir, "a") // an empty file is still a file
+	assertList(t, fsys, dir, "a")
 }
 
 func testSync(t *testing.T, fsys vfs.FS, dir string) {

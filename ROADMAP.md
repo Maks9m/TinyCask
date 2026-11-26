@@ -60,7 +60,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 - **Verification Command:** `go test -race -count=1 ./internal/vfs/... && make check`
 
 ### T1.3 — Record codec (2.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** Encode and decode the frozen v1 record format (ARCHITECTURE §3.1) with full validation.
 - **Files/Packages Touched:** `internal/storage/` (`record.go`, `errors.go`, `record_test.go`, `record_fuzz_test.go`, `testdata/`).
 - **Dependencies:** T1.1.
