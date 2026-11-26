@@ -99,7 +99,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 - **Verification Command:** `go test -race -count=1 ./internal/storage/ && make check`
 
 ### T1.6 — Segment scanner (2.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** Iterate the records of one file in order and report precisely where and why iteration stopped — the primitive that recovery and compaction share.
 - **Files/Packages Touched:** `internal/storage/` (`scanner.go`, tests).
 - **Dependencies:** T1.5.

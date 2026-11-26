@@ -110,3 +110,8 @@ Closing a ticket that touches disk: `fault-test-writer` (missing failure-path te
 - Time comes from an injectable clock on the engine options, so tests are deterministic.
 - Randomised tests take a seed, log it, and can be re-run with `-seed`.
 - Tests shrink limits (for example 4 KiB segments) instead of writing megabytes.
+
+<!-- claude-reflect: learned rules (saved from the band; edit freely) -->
+## Learned rules
+- Conserve usage limits: use Sonnet or Haiku for subagents instead of Opus where possible, and spawn fewer subagents.
+<!-- end claude-reflect -->
