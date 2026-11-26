@@ -431,9 +431,8 @@ type namedCall struct {
 	call func() error
 }
 
-// everyCall returns one call of each FS method, then each method of f, Close
-// last. In this order every call succeeds on a healthy FS where /db and
-// /db/a exist.
+// everyCall returns one call per FS method, then per method of f (Close last).
+// All succeed on a healthy FS with /db and /db/a.
 func everyCall(s *simfs.SimFS, f vfs.File) []namedCall {
 	calls := []namedCall{
 		{"Create", func() error { return closeIfOpened(s.Create("/db/new")) }},

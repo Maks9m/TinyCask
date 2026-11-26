@@ -7,22 +7,20 @@ import (
 	"github.com/Maks9m/TinyCask/internal/vfs"
 )
 
-// file is an open handle on an inode. It keeps working after the name it was
-// opened under is renamed or removed, because it holds the inode, not the name.
+// file is an open handle. It holds the inode, not the name, so it survives
+// Rename and Remove.
 type file struct {
-	fs   *SimFS
-	name string // name at open time, for error messages only
-	ino  *inode
-	gen  uint64 // SimFS generation at open time; Restart kills older handles
-	// closed is guarded by fs.mu.
-	closed bool
+	fs     *SimFS
+	name   string // for error messages only
+	ino    *inode
+	gen    uint64 // generation at open; Restart kills older handles
+	closed bool   // guarded by fs.mu
 }
 
 var _ vfs.File = (*file)(nil)
 
-// usable returns why the handle cannot serve op, wrapped for the caller: the
-// FS crashed or restarted since the handle was opened (ErrCrashed), or the
-// handle is closed. Caller holds f.fs.mu.
+// usable returns ErrCrashed (crash/restart since open) or fs.ErrClosed, or
+// nil. Caller holds f.fs.mu.
 func (f *file) usable(op string) error {
 	if err := f.fs.handleAlive(f.gen); err != nil {
 		return pathErr(op, f.name, err)
@@ -33,9 +31,8 @@ func (f *file) usable(op string) error {
 	return nil
 }
 
-// Write appends a copy of p to the file. The bytes are visible to every reader
-// at once but stay unsynced until Sync. An armed quota or tear can cut the
-// write short (faults.go); the bytes that land are kept and counted.
+// Write appends p, visible at once but unsynced until Sync. A quota or tear
+// may cut it short; the bytes that land are kept and counted.
 func (f *file) Write(p []byte) (int, error) {
 	f.fs.mu.Lock()
 	defer f.fs.mu.Unlock()
@@ -54,8 +51,8 @@ func (f *file) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// ReadAt copies bytes from off into p, synced or not. Like os.File it returns
-// io.EOF, unwrapped, when it reads fewer than len(p) bytes.
+// ReadAt reads at off, synced or not. Like os.File, a short read returns
+// unwrapped io.EOF.
 func (f *file) ReadAt(p []byte, off int64) (int, error) {
 	f.fs.mu.Lock()
 	defer f.fs.mu.Unlock()
@@ -79,8 +76,7 @@ func (f *file) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
-// Close releases the handle; a second Close returns fs.ErrClosed. A handle
-// killed by a crash or Restart cannot be closed: it returns ErrCrashed.
+// Close releases the handle; again gives fs.ErrClosed, after a crash ErrCrashed.
 func (f *file) Close() error {
 	f.fs.mu.Lock()
 	defer f.fs.mu.Unlock()
@@ -91,8 +87,7 @@ func (f *file) Close() error {
 	return nil
 }
 
-// Sync marks every byte currently in the file as durable. A failed Sync,
-// injected by FailNth, leaves the synced length unchanged.
+// Sync marks all current bytes durable. An injected failure changes nothing.
 func (f *file) Sync() error {
 	f.fs.mu.Lock()
 	defer f.fs.mu.Unlock()
@@ -106,8 +101,8 @@ func (f *file) Sync() error {
 	return nil
 }
 
-// Truncate cuts the file to size bytes, or zero-extends it as ftruncate does.
-// The synced length never exceeds the new size; extension bytes are unsynced.
+// Truncate cuts or zero-extends to size, like ftruncate. Synced length is
+// capped at size; extension bytes are unsynced.
 func (f *file) Truncate(size int64) error {
 	f.fs.mu.Lock()
 	defer f.fs.mu.Unlock()
@@ -142,16 +137,15 @@ func (f *file) Size() (int64, error) {
 
 // lockHandle releases an inode's lock on Close.
 type lockHandle struct {
-	fs   *SimFS
-	name string // name at lock time, for error messages only
-	ino  *inode
-	gen  uint64 // SimFS generation at lock time; Restart releases the lock
-	// closed is guarded by fs.mu.
-	closed bool
+	fs     *SimFS
+	name   string // for error messages only
+	ino    *inode
+	gen    uint64 // generation at lock time; Restart releases the lock
+	closed bool   // guarded by fs.mu
 }
 
-// Close releases the lock; a second Close returns fs.ErrClosed. After a crash
-// or Restart it returns ErrCrashed; Restart has already released the lock.
+// Close releases the lock; again gives fs.ErrClosed. After Restart it gives
+// ErrCrashed (Restart already released the lock).
 func (l *lockHandle) Close() error {
 	l.fs.mu.Lock()
 	defer l.fs.mu.Unlock()

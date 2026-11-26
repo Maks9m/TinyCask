@@ -22,18 +22,16 @@ type logRecord struct {
 	valueSize   uint32
 }
 
-// checkInvariants re-reads dir without using any engine state except what it
-// asserts on, and checks the design doc's invariants against e:
+// checkInvariants re-reads dir independently and checks e against it:
 //
-//   - no *.tmp file and no file superseded by a compaction output remains;
-//   - every data file scans cleanly (recovery cut any torn tail);
-//   - KeyDir holds exactly the keys whose last record in (FileID, offset)
-//     order is a PUT, each pointing at that record;
-//   - every KeyDir entry reads back from disk with a valid CRC, type PUT and
-//     the same key;
+//   - no *.tmp or superseded file remains;
+//   - every data file scans cleanly (torn tail already cut);
+//   - KeyDir holds exactly the keys whose last record (by FileID, offset) is
+//     a PUT, each pointing at that record;
+//   - every entry reads back with a valid CRC, type PUT and the same key;
 //   - liveBytes and diskBytes match the files.
 //
-// Call it while the engine is open and idle, after every reopen.
+// Call with the engine open and idle, after every reopen.
 func checkInvariants(tb testing.TB, fsys vfs.FS, dir string, e *Engine) {
 	tb.Helper()
 	files := checkerFiles(tb, fsys, dir)
