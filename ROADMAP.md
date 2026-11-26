@@ -119,7 +119,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 Goal: an embedded engine that passes the design doc's fault-injection scenarios 1 and 3.
 
 ### T2.1 — SimFS core (3 h)
-- [ ] Done
+- [x] Done
 - **Goal:** An in-memory `vfs.FS` that behaves like `OSFS`, ready to have faults added.
 - **Files/Packages Touched:** `internal/vfs/simfs/` (`simfs.go`, `file.go`, tests).
 - **Dependencies:** T1.2.
@@ -132,7 +132,7 @@ Goal: an embedded engine that passes the design doc's fault-injection scenarios 
 - **Verification Command:** `go test -race -count=1 ./internal/vfs/... && make check`
 
 ### T2.2 — Engine: open, put, get, delete, close (3 h)
-- [ ] Done
+- [x] Done
 - **Goal:** The façade from ARCHITECTURE §5.1–5.3, §5.6 and §10 working on an empty directory.
 - **Files/Packages Touched:** `internal/engine/` (`engine.go`, `options.go`, `errors.go`, `stats.go`, tests).
 - **Dependencies:** T1.4, T1.6, T2.1.
@@ -147,7 +147,7 @@ Goal: an embedded engine that passes the design doc's fault-injection scenarios 
 - **Verification Command:** `go test -race -count=1 ./internal/engine/ && make check`
 
 ### T2.3 — Recovery and the invariant checker (3.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** Rebuild KeyDir on `Open` per ARCHITECTURE §5.4, and a test helper that proves the design doc's invariants.
 - **Files/Packages Touched:** `internal/engine/` (`recovery.go`, `recovery_test.go`, `invariants_test.go`).
 - **Dependencies:** T2.2.
@@ -162,7 +162,7 @@ Goal: an embedded engine that passes the design doc's fault-injection scenarios 
 - **Verification Command:** `go test -race -count=1 -run 'Recover|Reopen|Invariant' ./internal/engine/ && make check`
 
 ### T2.4 — SimFS fault injection (3 h)
-- [ ] Done
+- [x] Done
 - **Goal:** The four deterministic faults from ARCHITECTURE §11.
 - **Files/Packages Touched:** `internal/vfs/simfs/` (`faults.go`, tests).
 - **Dependencies:** T2.1.
@@ -176,7 +176,7 @@ Goal: an embedded engine that passes the design doc's fault-injection scenarios 
 - **Verification Command:** `go test -race -count=1 ./internal/vfs/simfs/ && make check`
 
 ### T2.5 — Write-failure handling, sync policies, scenarios 1 and 3 (3.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** Make failed writes harmless (ARCHITECTURE §5.1 step 4–5, §7) and prove it with the design doc's scenarios.
 - **Files/Packages Touched:** `internal/engine/` (`engine.go`, `sync.go`, `fault_test.go`).
 - **Dependencies:** T2.3, T2.4.
