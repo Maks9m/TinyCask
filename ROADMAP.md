@@ -34,7 +34,7 @@ Off the critical path (do them whenever their dependency is met, for example on 
 Goal: the leaf packages exist, are tested in isolation, and the toolchain is green from the first commit.
 
 ### T1.1 — Repository scaffolding (2 h)
-- [ ] Done
+- [x] Done
 - **Goal:** A buildable, lintable, testable empty project so every later ticket starts from `make check` passing.
 - **Files/Packages Touched:** `go.mod`, `Makefile`, `.golangci.yml`, `.gitignore`, `.github/workflows/ci.yml`, `cmd/tinycask/main.go`, `doc.go` in each package listed in ARCHITECTURE §2.
 - **Dependencies:** none.
@@ -48,7 +48,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 - **Verification Command:** `make check && go run ./cmd/tinycask -version`
 
 ### T1.2 — VFS interfaces and OSFS (2.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** The file-system abstraction from ARCHITECTURE §11 with a real-disk implementation and a reusable conformance suite.
 - **Files/Packages Touched:** `internal/vfs/` (`vfs.go`, `errors.go`, `osfs.go`, `osfs_unix.go`, `vfstest/suite.go`, tests).
 - **Dependencies:** T1.1.
@@ -60,7 +60,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 - **Verification Command:** `go test -race -count=1 ./internal/vfs/... && make check`
 
 ### T1.3 — Record codec (2.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** Encode and decode the frozen v1 record format (ARCHITECTURE §3.1) with full validation.
 - **Files/Packages Touched:** `internal/storage/` (`record.go`, `errors.go`, `record_test.go`, `record_fuzz_test.go`, `testdata/`).
 - **Dependencies:** T1.1.
@@ -73,7 +73,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 - **Verification Command:** `go test -race -count=1 ./internal/storage/ && go test -run '^$' -fuzz FuzzDecodeRecord -fuzztime 20s ./internal/storage/ && make check`
 
 ### T1.4 — KeyDir index (2 h)
-- [ ] Done
+- [x] Done
 - **Goal:** The concurrent in-memory index from ARCHITECTURE §4.
 - **Files/Packages Touched:** `internal/index/` (`keydir.go`, tests, benchmark).
 - **Dependencies:** T1.1.
@@ -86,7 +86,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 - **Verification Command:** `go test -race -count=1 ./internal/index/ && go test -run '^$' -bench KeyDir -benchtime 1x ./internal/index/ && make check`
 
 ### T1.5 — Segments and the segment set (3.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** Append to an active segment, read from any segment, roll, and manage the set of open files.
 - **Files/Packages Touched:** `internal/storage/` (`names.go`, `segment.go`, `store.go`, tests).
 - **Dependencies:** T1.2, T1.3.
@@ -99,7 +99,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 - **Verification Command:** `go test -race -count=1 ./internal/storage/ && make check`
 
 ### T1.6 — Segment scanner (2.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** Iterate the records of one file in order and report precisely where and why iteration stopped — the primitive that recovery and compaction share.
 - **Files/Packages Touched:** `internal/storage/` (`scanner.go`, tests).
 - **Dependencies:** T1.5.

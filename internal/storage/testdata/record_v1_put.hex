@@ -1,0 +1,12 @@
+# Record format v1 golden bytes (ARCHITECTURE §3.1). FROZEN: never regenerate
+# this file to make a test pass; a mismatch means the on-disk format changed.
+# Computed independently of the Go codec (Python zlib.crc32 + struct.pack).
+#
+# PUT  timestamp=1700000000123456789  key="user"  value="data"  (29 bytes)
+f1 a0 d1 5e                # CRC32-IEEE of every byte below
+15 cd 85 3d fe 9c 97 17    # Timestamp, uint64 LE
+01                         # Type = PUT
+04 00 00 00                # KeySize = 4, uint32 LE
+04 00 00 00                # ValSize = 4, uint32 LE
+75 73 65 72                # Key   "user"
+64 61 74 61                # Value "data"
