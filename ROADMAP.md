@@ -73,7 +73,7 @@ Goal: the leaf packages exist, are tested in isolation, and the toolchain is gre
 - **Verification Command:** `go test -race -count=1 ./internal/storage/ && go test -run '^$' -fuzz FuzzDecodeRecord -fuzztime 20s ./internal/storage/ && make check`
 
 ### T1.4 — KeyDir index (2 h)
-- [ ] Done
+- [x] Done
 - **Goal:** The concurrent in-memory index from ARCHITECTURE §4.
 - **Files/Packages Touched:** `internal/index/` (`keydir.go`, tests, benchmark).
 - **Dependencies:** T1.1.
