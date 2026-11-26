@@ -22,8 +22,15 @@ const (
 // testClock is the fixed time every test engine stamps records with.
 func testClock() time.Time { return time.Unix(1_700_000_000, 0) }
 
+// testOptions keeps the default SyncInterval policy but with a ticker that
+// never fires, so no test depends on wall-clock time.
 func testOptions() Options {
-	return Options{MaxSegmentSize: testSegmentSize, Now: testClock}
+	return Options{MaxSegmentSize: testSegmentSize, Now: testClock, newTicker: silentTicker}
+}
+
+// silentTicker is a tickerFunc whose channel never delivers.
+func silentTicker(time.Duration) (<-chan time.Time, func()) {
+	return nil, func() {}
 }
 
 // openTest opens an engine on fsys and closes it at the end of the test.

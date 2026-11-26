@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -44,9 +45,15 @@ type Engine struct {
 	liveBytes atomic.Int64
 	diskBytes atomic.Int64
 
+	// bgCancel stops the background goroutines (the interval fsync ticker)
+	// and bg waits for them (invariant 11). Both are set by Open before the
+	// engine is shared and only used by Close afterwards.
+	bgCancel context.CancelFunc
+	bg       sync.WaitGroup
+
 	// mu is the writer lock (invariant 2). It covers each append together
-	// with its KeyDir update and counters, rolls, and Close. Lock order:
-	// mu → KeyDir → Store (invariant 3).
+	// with its KeyDir update and counters, rolls, the read-only transition
+	// and Close. Lock order: mu → KeyDir → Store (invariant 3).
 	mu sync.Mutex
 }
 
@@ -81,6 +88,7 @@ func Open(fsys vfs.FS, dir string, opts Options) (*Engine, error) {
 	if err = e.recover(fsys); err != nil {
 		return nil, errors.Join(err, e.store.Close(), e.releaseLock())
 	}
+	e.startBackground()
 	return e, nil
 }
 
@@ -202,10 +210,13 @@ func (e *Engine) Delete(key []byte) error {
 	return nil
 }
 
-// Close syncs the active segment, closes every file and releases LOCK
-// (ARCHITECTURE §5.6). It is idempotent; every other method then returns
-// ErrClosed. The engine is closed even if Close returns an error.
+// Close stops the background goroutines, syncs the active segment, closes
+// every file and releases LOCK (ARCHITECTURE §5.6). It is idempotent; every
+// other method then returns ErrClosed. The engine is closed even if Close
+// returns an error.
 func (e *Engine) Close() error {
+	// Before taking mu: a background sync may be waiting for it.
+	e.stopBackground()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed.Swap(true) {
@@ -218,8 +229,11 @@ func (e *Engine) Close() error {
 	return errors.Join(serr, e.releaseLock())
 }
 
-// appendLocked rolls if needed and appends frame, keeping diskBytes next to
-// the append. e.mu must be held.
+// appendLocked rolls if needed, appends frame and applies SyncAlways,
+// keeping diskBytes next to the append. A failed append was truncated away
+// by the Store; a failed truncate or fsync makes the engine read-only
+// (invariant 8). On any error the caller must leave KeyDir alone. e.mu must
+// be held.
 func (e *Engine) appendLocked(frame []byte) (fileID uint32, off int64, err error) {
 	if err = e.writableLocked(); err != nil {
 		return 0, 0, err
@@ -231,7 +245,12 @@ func (e *Engine) appendLocked(frame []byte) (fileID uint32, off int64, err error
 	if err != nil {
 		return 0, 0, e.fail(fmt.Errorf("engine: append: %w", err))
 	}
+	// The frame is in the file now, even if the fsync below fails; a Put
+	// that then returns an error may still reappear after recovery.
 	e.diskBytes.Add(int64(len(frame)))
+	if err = e.syncAfterAppendLocked(); err != nil {
+		return 0, 0, err
+	}
 	return fileID, off, nil
 }
 

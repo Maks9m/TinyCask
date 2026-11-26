@@ -176,7 +176,7 @@ Goal: an embedded engine that passes the design doc's fault-injection scenarios 
 - **Verification Command:** `go test -race -count=1 ./internal/vfs/simfs/ && make check`
 
 ### T2.5 — Write-failure handling, sync policies, scenarios 1 and 3 (3.5 h)
-- [ ] Done
+- [x] Done
 - **Goal:** Make failed writes harmless (ARCHITECTURE §5.1 step 4–5, §7) and prove it with the design doc's scenarios.
 - **Files/Packages Touched:** `internal/engine/` (`engine.go`, `sync.go`, `fault_test.go`).
 - **Dependencies:** T2.3, T2.4.
