@@ -12,8 +12,8 @@ import (
 	"github.com/Maks9m/TinyCask/internal/vfs"
 )
 
-// requireDamaged checks that s refuses every kind of write with
-// ErrSegmentDamaged and touches no file while doing so (invariant 8).
+// requireDamaged checks every write fails with ErrSegmentDamaged and touches
+// no file (invariant 8).
 func requireDamaged(tb testing.TB, s *Store, ffs *faultFS) {
 	tb.Helper()
 	mark := len(ffs.ops())
@@ -62,8 +62,7 @@ func TestFault_StoreAppend_FailedWriteIsTruncatedAway(t *testing.T) {
 			_, size, _ := s.Active()
 			assert.Equal(t, end, size)
 
-			// The store stays writable and the next record lands where the
-			// failed one would have.
+			// Still writable; the next record lands where the failed one would.
 			next := testFrame(t, "next", 10)
 			assert.Equal(t, end, appendFrame(t, s, next, 1))
 			requireReadable(t, s, 1, 0, good)
@@ -115,11 +114,9 @@ func TestFault_StoreSyncActive_FailedSyncDamagesStore(t *testing.T) {
 	assert.NotContains(t, opsSince(ffs, mark), "sync "+SegmentName(1), "an fsync error is never retried")
 }
 
-// TestFault_StoreSyncActive_SegmentSealedAndDroppedMidSync replays the race
-// between the interval fsync and a roll plus compaction: SyncActive picks
-// segment 1, then before its fsync runs, Roll seals segment 1 (syncing it) and
-// Drop closes it. The late fsync fails on the closed handle; that must not
-// damage the Store, because segment 1 was already synced by Roll.
+// TestFault_StoreSyncActive_SegmentSealedAndDroppedMidSync: SyncActive picks
+// segment 1, then Roll seals (syncs) it and Drop closes it before the fsync.
+// The late fsync fails but must not damage the Store: Roll already synced it.
 func TestFault_StoreSyncActive_SegmentSealedAndDroppedMidSync(t *testing.T) {
 	t.Parallel()
 	s, ffs, _ := newTestStore(t)
@@ -228,8 +225,7 @@ func TestFault_StoreCreateActive(t *testing.T) {
 
 func TestFault_StoreRegister(t *testing.T) {
 	t.Parallel()
-	// newWithFile returns a store whose directory holds seg_<id>.data with
-	// one frame in it.
+	// newWithFile returns a store whose dir holds seg_<id>.data with one frame.
 	newWithFile := func(t *testing.T, id uint32) (*Store, *faultFS, []byte) {
 		t.Helper()
 		s, ffs, dir := newTestStore(t)

@@ -15,13 +15,11 @@ import (
 	"github.com/Maks9m/TinyCask/internal/vfs"
 )
 
-// testLimits keeps records small, as the testing rules ask: the largest
-// frame is HeaderSize + 16 + 64 bytes.
+// testLimits keeps records small: max frame is HeaderSize + 16 + 64 bytes.
 var testLimits = Limits{MaxKeySize: 16, MaxValueSize: 64}
 
-// newTestStore returns a Store over a faultFS rooted in a fresh temporary
-// directory. The Store is closed at cleanup; Close is idempotent, so tests
-// may close it themselves.
+// newTestStore returns a Store over a faultFS in a temp dir, closed at cleanup
+// (Close is idempotent, so tests may close it too).
 func newTestStore(tb testing.TB) (*Store, *faultFS, string) {
 	tb.Helper()
 	dir := tb.TempDir()
@@ -272,8 +270,8 @@ func TestStore_ReadAtRejectsBadRanges(t *testing.T) {
 	}
 }
 
-// buildSealed returns a Store whose files 1..n are sealed, each holding one
-// frame, with active segment n+1. frames[i] lives in file i+1 at offset 0.
+// buildSealed returns a Store with sealed files 1..n (frames[i] at offset 0 of
+// file i+1) and active segment n+1.
 func buildSealed(tb testing.TB, n int) (s *Store, ffs *faultFS, dir string, frames [][]byte) {
 	tb.Helper()
 	s, ffs, dir = newTestStore(tb)
@@ -328,9 +326,8 @@ func TestStore_DropChecksEveryIDFirst(t *testing.T) {
 	assert.Len(t, listDir(t, dir), 3)
 }
 
-// TestStore_DropClosesOnlyAfterRemovingFromSet checks ARCHITECTURE §6 at the
-// exact moment a dropped file is closed: it has left the set and Store.mu is
-// not held.
+// TestStore_DropClosesOnlyAfterRemovingFromSet (ARCHITECTURE §6): at Close the
+// file has left the set and Store.mu is not held.
 func TestStore_DropClosesOnlyAfterRemovingFromSet(t *testing.T) {
 	t.Parallel()
 	s, ffs, _, _ := buildSealed(t, 1)

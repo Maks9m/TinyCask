@@ -13,8 +13,7 @@ import (
 
 // StoreOptions configures a Store. The zero value uses the defaults.
 type StoreOptions struct {
-	// Limits bound the length of a single ReadAt to the largest record they
-	// allow. Zero fields mean the defaults.
+	// Limits cap a single ReadAt at the largest allowed record.
 	Limits Limits
 }
 
@@ -23,40 +22,33 @@ func (o StoreOptions) withDefaults() StoreOptions {
 	return o
 }
 
-// Store is the set of open data files of one directory, keyed by file ID: at
-// most one active segment that takes appends, plus any number of sealed
-// files (old segments and compaction outputs) that are only read.
+// Store is the set of open data files in one directory, keyed by file ID: at
+// most one active segment (takes appends) plus read-only sealed files.
 //
 // Concurrency (ARCHITECTURE §6):
-//   - Append, CreateActive, Roll and Close change the active segment and must
-//     be serialized by the caller (the engine's writer lock). Store.mu does not
-//     order appends; it protects only the set.
-//   - ReadAt, Register, Drop, SyncActive, Active and DiskBytes are safe to call
-//     concurrently with each other and with the calls above, except that
-//     nothing may run concurrently with Close.
+//   - Append, CreateActive, Roll, Close: caller serializes (engine writer
+//     lock). Store.mu protects only the set, not append order.
+//   - ReadAt, Register, Drop, SyncActive, Active, DiskBytes: safe concurrently
+//     with everything except Close.
 //
-// Once an append cannot be undone or an fsync fails, the Store is damaged: it
-// refuses every later write with ErrSegmentDamaged (invariant 8). Reads keep
-// working.
+// After an unrecoverable append or failed fsync the Store is damaged: writes
+// fail with ErrSegmentDamaged (invariant 8); reads still work.
 type Store struct {
 	fsys vfs.FS
 	dir  string
 	opts StoreOptions
 
-	// damaged is one-way; see ErrSegmentDamaged.
-	damaged atomic.Bool
+	damaged atomic.Bool // one-way
 
-	// mu protects the set. The read lock is held across a ReadAt so a file
-	// cannot be closed under a reader; the write lock is held only while
-	// entries are added or removed, never during I/O.
+	// mu protects the set. RLock is held across ReadAt so a file can't be
+	// closed under a reader; Lock only while editing the map, never during I/O.
 	mu     sync.RWMutex
 	segs   map[uint32]*segment
-	active *segment // also present in segs; nil until CreateActive
+	active *segment // also in segs; nil until CreateActive
 	closed bool
 }
 
-// NewStore returns an empty Store for the data files in dir. It touches no
-// files; CreateActive and Register populate it.
+// NewStore returns an empty Store for dir without touching any files.
 func NewStore(fsys vfs.FS, dir string, opts StoreOptions) *Store {
 	return &Store{
 		fsys: fsys,
@@ -67,11 +59,8 @@ func NewStore(fsys vfs.FS, dir string, opts StoreOptions) *Store {
 }
 
 // CreateActive creates seg_<id>.data as the active segment and syncs the
-// directory. It fails if there already is an active segment, if id is not
-// above every file in the set, or if the file already exists on disk.
-//
-// If the directory sync fails the segment stays installed but the Store is
-// damaged and the error wraps ErrSegmentDamaged.
+// directory. id must be above every file in the set and the file must not
+// exist. A failed directory sync damages the Store.
 func (s *Store) CreateActive(id uint32) error {
 	if err := s.writable(); err != nil {
 		return err
@@ -89,9 +78,8 @@ func (s *Store) CreateActive(id uint32) error {
 	return s.syncDir()
 }
 
-// Register opens an existing sealed file (a segment from an earlier run or a
-// finished compaction output) and adds it to the set so it can be read. Its
-// ID must be free and below the active segment's.
+// Register opens an existing sealed file (old segment or compaction output)
+// for reading. Its ID must be free and below the active segment's.
 func (s *Store) Register(name FileName) error {
 	if !name.Readable() {
 		return fmt.Errorf("storage: register %s: kind %v holds no readable records", name, name.Kind)
@@ -110,14 +98,11 @@ func (s *Store) Register(name FileName) error {
 	return nil
 }
 
-// Append writes frame, a complete encoded record, to the active segment with
-// a single Write and returns where it landed. It requires external
-// serialization (see Store).
+// Append writes an encoded record to the active segment with one Write and
+// returns where it landed. Caller serializes (see Store).
 //
-// A failed or short write is truncated away and the error returned; the
-// Store stays writable. If the truncate fails too, the error wraps
-// ErrSegmentDamaged and the Store accepts no more writes. Out-of-space errors
-// keep vfs.ErrNoSpace in their chain.
+// A failed write is truncated away and the Store stays writable; if the
+// truncate fails, the Store is damaged. vfs.ErrNoSpace stays in the chain.
 func (s *Store) Append(frame []byte) (fileID uint32, offset int64, err error) {
 	if err = s.writable(); err != nil {
 		return 0, 0, err
@@ -136,11 +121,9 @@ func (s *Store) Append(frame []byte) (fileID uint32, offset int64, err error) {
 	return seg.name.ID, off, nil
 }
 
-// ReadAt reads exactly n bytes at offset from file fileID with one positional
-// read. Bytes returned by a completed Append are visible immediately. An
-// unknown or dropped fileID returns ErrSegmentNotFound; n outside 1..the
-// largest record the limits allow, or a range past the end of the file,
-// returns ErrCorrupt.
+// ReadAt reads exactly n bytes at offset from fileID in one positional read;
+// completed appends are visible at once. Unknown or dropped file:
+// ErrSegmentNotFound. n out of 1..MaxRecordSize or past EOF: ErrCorrupt.
 func (s *Store) ReadAt(fileID uint32, offset, n int64) ([]byte, error) {
 	if maxN := s.opts.Limits.MaxRecordSize(); n < 1 || n > maxN {
 		return nil, fmt.Errorf("%w: read of %d bytes from file %d: want 1..%d", ErrCorrupt, n, fileID, maxN)
@@ -157,14 +140,11 @@ func (s *Store) ReadAt(fileID uint32, offset, n int64) ([]byte, error) {
 	return seg.readAt(offset, n)
 }
 
-// Roll seals the active segment and makes seg_<nextID>.data the active one:
-// it syncs the current file, creates the next, installs it and syncs the
-// directory (invariant 7). nextID must be above every file in the set. It
-// requires external serialization (see Store).
+// Roll seals the active segment and makes seg_<nextID>.data active: sync
+// current, create next, install, sync dir (invariant 7). Caller serializes.
 //
-// If the sync of the current file or of the directory fails, the Store is
-// damaged and the error wraps ErrSegmentDamaged. If only creating the next
-// file fails, the current segment stays active and writable.
+// A failed sync damages the Store. If only the create fails, the current
+// segment stays active and writable.
 func (s *Store) Roll(nextID uint32) error {
 	if err := s.writable(); err != nil {
 		return err
@@ -190,15 +170,12 @@ func (s *Store) Roll(nextID uint32) error {
 	return s.syncDir()
 }
 
-// Drop removes the given sealed files from the set, then closes and deletes
-// them and syncs the directory. A file leaves the set before it is closed,
-// so a concurrent ReadAt either completes or gets ErrSegmentNotFound
-// (ARCHITECTURE §6). Duplicate IDs are ignored.
+// Drop removes sealed files from the set, then closes, deletes and syncs the
+// dir. Leaving the set before closing means a concurrent ReadAt either
+// finishes or gets ErrSegmentNotFound (ARCHITECTURE §6).
 //
-// Drop checks every ID first and changes nothing if one is unknown
-// (ErrSegmentNotFound) or is the active segment (ErrSegmentOrder). Once the
-// files have left the set, close and delete errors are joined and returned;
-// a failed directory sync damages the Store.
+// All IDs are checked first; an unknown or active ID changes nothing. After
+// that, close/remove errors are joined; a failed dir sync damages the Store.
 func (s *Store) Drop(ids []uint32) error {
 	dropped, err := s.detach(ids)
 	if err != nil || len(dropped) == 0 {
@@ -215,13 +192,11 @@ func (s *Store) Drop(ids []uint32) error {
 	return errors.Join(errs...)
 }
 
-// SyncActive fsyncs the active segment. A failure damages the Store: an
-// fsync error is never retried (ARCHITECTURE §7).
+// SyncActive fsyncs the active segment. A failure damages the Store; fsync is
+// never retried (ARCHITECTURE §7).
 //
-// SyncActive does not hold Store.mu during the fsync, so a concurrent Roll
-// may seal the segment, and a Drop may then close it, before the fsync runs.
-// That fsync then fails on a closed handle, but Roll already synced the
-// segment before sealing it, so nothing is at risk and the error is dropped.
+// Store.mu isn't held during the fsync, so Roll+Drop may seal and close the
+// segment first. That error is ignored: Roll already synced it.
 func (s *Store) SyncActive() error {
 	if err := s.writable(); err != nil {
 		return err
@@ -240,8 +215,7 @@ func (s *Store) SyncActive() error {
 	return nil
 }
 
-// Active returns the active segment's ID and its size in bytes; ok is false
-// if there is none.
+// Active returns the active segment's ID and size; ok is false if none.
 func (s *Store) Active() (id uint32, size int64, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -251,7 +225,7 @@ func (s *Store) Active() (id uint32, size int64, ok bool) {
 	return s.active.name.ID, s.active.size.Load(), true
 }
 
-// DiskBytes returns the total size of every file in the set.
+// DiskBytes returns the total size of all files in the set.
 func (s *Store) DiskBytes() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -262,8 +236,8 @@ func (s *Store) DiskBytes() int64 {
 	return total
 }
 
-// Close syncs the active segment, unless the Store is damaged, and closes
-// every file. Later calls return ErrStoreClosed; a second Close returns nil.
+// Close syncs the active segment (unless damaged) and closes all files. Later
+// calls return ErrStoreClosed; a second Close returns nil.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -292,12 +266,12 @@ func (s *Store) Close() error {
 type addMode uint8
 
 const (
-	addActive addMode = iota + 1 // the first active segment
-	addRoll                      // the next active segment, replacing cur
-	addSealed                    // a sealed file below the active segment
+	addActive addMode = iota + 1 // first active segment
+	addRoll                      // next active segment, replacing cur
+	addSealed                    // sealed file below the active one
 )
 
-// writable reports why the Store cannot take writes, if it cannot.
+// writable returns why the Store can't take writes, or nil.
 func (s *Store) writable() error {
 	s.mu.RLock()
 	closed := s.closed
@@ -323,16 +297,16 @@ func (s *Store) activeSegment() (*segment, error) {
 	return s.active, nil
 }
 
-// checkAdd applies the ordering rules before any file is touched, so a call
-// that is bound to fail leaves nothing behind on disk.
+// checkAdd checks ordering before any file is touched, so a doomed call
+// leaves nothing on disk.
 func (s *Store) checkAdd(id uint32, mode addMode, cur *segment) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.checkAddLocked(id, mode, cur)
 }
 
-// install re-applies the ordering rules under the write lock, because the set
-// may have changed during the file I/O since checkAdd, and adds seg.
+// install re-checks ordering under the write lock (the set may have changed
+// during I/O since checkAdd) and adds seg.
 func (s *Store) install(seg *segment, mode addMode, cur *segment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -351,8 +325,8 @@ func (s *Store) install(seg *segment, mode addMode, cur *segment) error {
 	return nil
 }
 
-// checkAddLocked enforces invariant 4 on the set: IDs are unique, the active
-// segment has the highest ID, and sealed files sit below it. s.mu must be held.
+// checkAddLocked enforces invariant 4: unique IDs, active is highest, sealed
+// below it. s.mu must be held.
 func (s *Store) checkAddLocked(id uint32, mode addMode, cur *segment) error {
 	if s.closed {
 		return ErrStoreClosed
@@ -381,10 +355,8 @@ func (s *Store) checkAddLocked(id uint32, mode addMode, cur *segment) error {
 	return nil
 }
 
-// discard closes and deletes a file that was created but never installed.
-// The directory is not synced afterwards: the create was never synced either,
-// and if the delete is lost in a crash, recovery finds only an empty segment,
-// which replays to nothing.
+// discard closes and deletes a created-but-never-installed file. No dir sync:
+// if the delete is lost in a crash, recovery just finds an empty segment.
 func (s *Store) discard(seg *segment) error {
 	errs := []error{seg.close()}
 	if err := s.fsys.Remove(seg.path); err != nil {
@@ -393,8 +365,7 @@ func (s *Store) discard(seg *segment) error {
 	return errors.Join(errs...)
 }
 
-// syncDir makes creates and removes in the directory durable. Like any fsync
-// failure, a failed directory sync damages the Store.
+// syncDir makes dir changes durable; failure damages the Store.
 func (s *Store) syncDir() error {
 	if err := s.fsys.SyncDir(s.dir); err != nil {
 		s.damaged.Store(true)
@@ -403,8 +374,8 @@ func (s *Store) syncDir() error {
 	return nil
 }
 
-// detach validates every ID and then removes the files from the set, all
-// under one write lock, and returns them for closing outside it.
+// detach validates all IDs and removes them from the set under one lock,
+// returning the segments to close outside it.
 func (s *Store) detach(ids []uint32) ([]*segment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

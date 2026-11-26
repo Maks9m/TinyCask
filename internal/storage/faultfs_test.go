@@ -15,8 +15,7 @@ import (
 	"github.com/Maks9m/TinyCask/internal/vfs"
 )
 
-// seedFlag drives every randomized test in this package. Re-run a failure with
-// go test -run TestName ./internal/storage/ -seed=<logged seed>.
+// seedFlag seeds randomized tests; re-run with -seed=<logged seed>.
 var seedFlag = flag.Uint64("seed", 1, "seed for randomized storage tests")
 
 func testRand(tb testing.TB) *rand.Rand {
@@ -48,15 +47,13 @@ const (
 // fault is a one-shot failure of the next call of an operation.
 type fault struct {
 	err error
-	// n is how many bytes really reach the file (opWrite) or the caller
-	// (opRead) before err is returned. Ignored for other operations.
+	// n bytes reach the file (write) or caller (read) before err.
 	n int
 }
 
-// faultFS wraps OSFS under t.TempDir() and fails chosen operations once. It
-// stands in for simfs (T2.1) in this package's failure-path tests. It also
-// logs every mutating operation, in order, as "<op> <base name>", so tests can
-// check the sequence the durability rules require (invariant 7).
+// faultFS wraps OSFS under t.TempDir() and fails chosen operations once
+// (stand-in for simfs until T2.1). It logs mutating ops as "<op> <base>" so
+// tests can check durability order (invariant 7).
 type faultFS struct {
 	inner vfs.FS
 
@@ -84,8 +81,7 @@ func (f *faultFS) arm(op fsOp, flt fault) {
 	f.armed[op] = flt
 }
 
-// onNext runs hook (once) at the start of the next call of op, before the
-// operation itself, with no faultFS lock held.
+// onNext runs hook once before the next call of op, with no lock held.
 func (f *faultFS) onNext(op fsOp, hook func(name string)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -211,8 +207,7 @@ func (f *faultFile) Size() (int64, error) {
 	return f.inner.Size()
 }
 
-// Close always releases the real handle, so a failed Close leaks nothing, and
-// then reports the armed fault if there is one.
+// Close always releases the real handle, then reports any armed fault.
 func (f *faultFile) Close() error {
 	flt, ok := f.fs.take(opClose, f.name)
 	err := f.inner.Close()

@@ -1,4 +1,4 @@
-// Package compactor merges every sealed segment into a single compact_<M>.data
-// file that keeps only the records the KeyDir still points at, then swaps the
-// new locations into the index (ARCHITECTURE §8).
+// Package compactor merges all sealed segments into one compact_<M>.data with
+// only the live records, then swaps the new locations into the KeyDir
+// (ARCHITECTURE §8).
 package compactor

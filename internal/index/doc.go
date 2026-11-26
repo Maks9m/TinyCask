@@ -1,5 +1,3 @@
-// Package index implements the KeyDir: the concurrent in-memory map from each
-// live key to the location of its newest record on disk (ARCHITECTURE §4).
-//
-// It does no I/O and imports no other TinyCask package.
+// Package index implements the KeyDir: an in-memory map from each live key to
+// its newest record on disk (ARCHITECTURE §4). No I/O, no TinyCask imports.
 package index

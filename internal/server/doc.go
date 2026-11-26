@@ -1,4 +1,3 @@
-// Package server is the TCP front end: it parses the RESP2 subset and inline
-// commands, dispatches them to a store it reaches through its own small
-// interface, and writes the replies (ARCHITECTURE §9).
+// Package server is the TCP front end: it parses RESP2/inline commands and
+// dispatches them to a store behind its own small interface (ARCHITECTURE §9).
 package server

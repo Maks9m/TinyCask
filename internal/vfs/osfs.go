@@ -10,27 +10,25 @@ import (
 	"slices"
 )
 
-// File permissions for everything OSFS creates.
 const (
 	filePerm os.FileMode = 0o644
 	dirPerm  os.FileMode = 0o755
 )
 
-// Open flags. O_APPEND makes the kernel place every write at the current end
-// of the file, which is what File.Write promises, even after a Truncate.
+// O_APPEND makes every write land at the end, even after Truncate.
 const (
 	createFlags = os.O_RDWR | os.O_APPEND | os.O_CREATE | os.O_EXCL
 	openFlags   = os.O_RDWR | os.O_APPEND
 	lockFlags   = os.O_RDWR | os.O_CREATE
 )
 
-// OSFS is the FS backed by the real operating-system file system. The zero
-// value is ready to use and safe for concurrent use.
+// OSFS is the FS backed by the real file system. The zero value is ready and
+// safe for concurrent use.
 type OSFS struct{}
 
 var _ FS = OSFS{}
 
-// Create makes a new file for reading and appending; it fails if name exists.
+// Create makes a new file; it fails if name exists.
 func (OSFS) Create(name string) (File, error) {
 	f, err := os.OpenFile(name, createFlags, filePerm)
 	if err != nil {
@@ -39,7 +37,7 @@ func (OSFS) Create(name string) (File, error) {
 	return &osFile{f: f}, nil
 }
 
-// Open opens an existing file for reading and appending.
+// Open opens an existing file.
 func (OSFS) Open(name string) (File, error) {
 	f, err := os.OpenFile(name, openFlags, 0)
 	if err != nil {
@@ -48,12 +46,12 @@ func (OSFS) Open(name string) (File, error) {
 	return &osFile{f: f}, nil
 }
 
-// Remove deletes the file name.
+// Remove deletes name.
 func (OSFS) Remove(name string) error {
 	return mapErr(os.Remove(name))
 }
 
-// Rename atomically moves oldName to newName, replacing newName if it exists.
+// Rename atomically moves oldName to newName.
 func (OSFS) Rename(oldName, newName string) error {
 	return mapErr(os.Rename(oldName, newName))
 }
@@ -68,8 +66,7 @@ func (OSFS) List(dir string) ([]string, error) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	// os.ReadDir already sorts, but the order is part of the FS contract, so
-	// it is not left to an implementation detail of the standard library.
+	// os.ReadDir sorts too, but sorting is our contract, so don't rely on it.
 	slices.Sort(names)
 	return names, nil
 }
@@ -79,7 +76,7 @@ func (OSFS) MkdirAll(dir string) error {
 	return mapErr(os.MkdirAll(dir, dirPerm))
 }
 
-// SyncDir fsyncs dir so that creates, renames and removes in it are durable.
+// SyncDir fsyncs dir so its entry changes are durable.
 func (OSFS) SyncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
@@ -91,10 +88,8 @@ func (OSFS) SyncDir(dir string) error {
 	return mapErr(d.Close())
 }
 
-// Lock takes an exclusive flock on name, creating the file if needed. It
-// returns ErrLocked if another open handle, in this or another process,
-// already holds the lock. Closing the returned io.Closer releases the lock;
-// the lock file itself is left in place.
+// Lock takes an exclusive flock on name (ErrLocked if held by any handle, even
+// in this process). Closing the result releases it; the file is left in place.
 func (OSFS) Lock(name string) (io.Closer, error) {
 	f, err := os.OpenFile(name, lockFlags, filePerm)
 	if err != nil {
@@ -106,45 +101,39 @@ func (OSFS) Lock(name string) (io.Closer, error) {
 	return f, nil
 }
 
-// osFile adapts *os.File to File, translating ENOSPC on the way out.
+// osFile adapts *os.File to File, mapping ENOSPC.
 type osFile struct {
 	f *os.File
 }
 
 var _ File = (*osFile)(nil)
 
-// Write appends p to the file. A short write returns the bytes written.
 func (o *osFile) Write(p []byte) (int, error) {
 	n, err := o.f.Write(p)
 	return n, mapErr(err)
 }
 
-// ReadAt reads len(p) bytes at off; it returns io.EOF when it reads past the end.
 func (o *osFile) ReadAt(p []byte, off int64) (int, error) {
 	n, err := o.f.ReadAt(p, off)
 	if errors.Is(err, io.EOF) {
-		// Callers compare io.EOF with ==; keep it unwrapped.
+		// Some callers compare io.EOF with ==; keep it unwrapped.
 		return n, io.EOF
 	}
 	return n, mapErr(err)
 }
 
-// Close closes the file.
 func (o *osFile) Close() error {
 	return mapErr(o.f.Close())
 }
 
-// Sync fsyncs the file's contents.
 func (o *osFile) Sync() error {
 	return mapErr(o.f.Sync())
 }
 
-// Truncate cuts the file to size bytes.
 func (o *osFile) Truncate(size int64) error {
 	return mapErr(o.f.Truncate(size))
 }
 
-// Size returns the file's current length.
 func (o *osFile) Size() (int64, error) {
 	fi, err := o.f.Stat()
 	if err != nil {
@@ -153,8 +142,7 @@ func (o *osFile) Size() (int64, error) {
 	return fi.Size(), nil
 }
 
-// mapErr adds ErrNoSpace to the chain of an ENOSPC error and returns every
-// other error, including nil, unchanged.
+// mapErr wraps ENOSPC with ErrNoSpace; other errors (and nil) pass through.
 func mapErr(err error) error {
 	if err != nil && isNoSpace(err) {
 		return fmt.Errorf("%w: %w", ErrNoSpace, err)

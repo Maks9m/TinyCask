@@ -6,18 +6,15 @@ import (
 	"io"
 )
 
-// DefaultScanChunkSize is how many bytes a Scanner asks for per ReadAt by
-// default. Records are usually far smaller, so one read covers many of them.
+// DefaultScanChunkSize is the default ReadAt size; one read covers many records.
 const DefaultScanChunkSize = 64 << 10
 
 // ScanOptions configures a Scanner. The zero value uses the defaults.
 type ScanOptions struct {
-	// Limits are checked against every header before its lengths are trusted.
-	// Zero fields mean the defaults.
+	// Limits are checked on every header before its lengths are trusted.
 	Limits Limits
-	// ChunkSize is the preferred length of one ReadAt. A record longer than
-	// this is read with one ReadAt of exactly its (validated) length. Zero or
-	// negative means DefaultScanChunkSize.
+	// ChunkSize is the preferred ReadAt size. A longer record is read in one
+	// ReadAt of its exact length. <= 0 means DefaultScanChunkSize.
 	ChunkSize int
 }
 
@@ -29,30 +26,27 @@ func (o ScanOptions) withDefaults() ScanOptions {
 	return o
 }
 
-// ScanError reports why a scan stopped before the end of the file and where:
-// Offset is the first byte of the record that could not be read, which is
-// also the end of the last valid record. Recovery truncates the highest-ID
-// file to exactly this length (ARCHITECTURE §5.4).
+// ScanError says where and why a scan stopped early. Offset is the end of the
+// last valid record; recovery truncates the highest-ID file to it
+// (ARCHITECTURE §5.4).
 //
-// Err wraps ErrCorrupt when the bytes are not a valid record. Any other Err is
-// an I/O error from the reader, and says nothing about the file's contents.
+// Err wraps ErrCorrupt for bad bytes; anything else is an I/O error and says
+// nothing about the file's contents (so recovery must not truncate).
 type ScanError struct {
 	Offset int64
 	Err    error
 }
 
-// Error reports the stop offset and the cause.
+// Error implements error.
 func (e *ScanError) Error() string {
 	return fmt.Sprintf("storage: scan stopped at offset %d: %v", e.Offset, e.Err)
 }
 
-// Unwrap returns Err, so errors.Is(err, ErrCorrupt) sees through a ScanError.
+// Unwrap lets errors.Is(err, ErrCorrupt) see through a ScanError.
 func (e *ScanError) Unwrap() error { return e.Err }
 
-// Scanner iterates the records of one data file in order, from offset 0 up to
-// a given size. It is the primitive recovery and compaction share.
-//
-// Use it like bufio.Scanner:
+// Scanner reads one data file's records in order, from 0 up to size. Shared
+// by recovery and compaction. Usage, like bufio.Scanner:
 //
 //	sc := NewScanner(f, size, opts)
 //	for sc.Next() {
@@ -60,41 +54,34 @@ func (e *ScanError) Unwrap() error { return e.Err }
 //	}
 //	if err := sc.Err(); err != nil { ... }
 //
-// The scanner reads with ReadAt in chunks of about ScanOptions.ChunkSize
-// bytes and keeps at most one chunk or one record in memory, never the whole
-// file. Every header is validated against the limits before the record's
-// length decides how much to read or allocate (invariant 10).
-//
-// A Scanner is not safe for concurrent use.
+// It reads in chunks and holds at most one chunk or record, never the whole
+// file. Headers are validated before their lengths size a read (invariant 10).
+// Not safe for concurrent use.
 type Scanner struct {
 	r    io.ReaderAt
 	size int64
 	opts ScanOptions
 
-	// buf is reused across reads; it only grows, and never past the larger of
-	// the chunk size and the largest record the limits allow.
+	// buf is reused; it grows up to max(chunk, largest allowed record).
 	buf []byte
-	// win holds the file bytes [winOff, winOff+len(win)); it aliases buf.
+	// win holds file bytes [winOff, winOff+len(win)); it aliases buf.
 	win    []byte
 	winOff int64
 
-	// off is the offset of the next record to decode.
-	off    int64
+	off    int64 // next record to decode
 	rec    Record
 	recOff int64
 	err    error
 	done   bool
 }
 
-// NewScanner returns a Scanner over the first size bytes of r. size is
-// normally the file's length; the scanner never reads past it.
+// NewScanner returns a Scanner over the first size bytes of r.
 func NewScanner(r io.ReaderAt, size int64, opts ScanOptions) *Scanner {
 	return &Scanner{r: r, size: size, opts: opts.withDefaults()}
 }
 
-// Next advances to the next record and reports whether there is one. It
-// returns false at a clean end of file and when the scan fails; Err tells the
-// two apart. Once Next has returned false it always does.
+// Next advances to the next record. It returns false at EOF or on failure
+// (check Err), and keeps returning false after that.
 func (s *Scanner) Next() bool {
 	s.rec, s.recOff = Record{}, s.off
 	if s.done {
@@ -116,8 +103,7 @@ func (s *Scanner) Next() bool {
 	if err != nil {
 		return s.fail(err)
 	}
-	// The header passed the limits, so n <= Limits.MaxRecordSize().
-	n := h.RecordSize()
+	n := h.RecordSize() // safe: header passed the limits
 	frame, err := s.window(s.off, n, violShortPayload)
 	if err != nil {
 		return s.fail(err)
@@ -132,25 +118,20 @@ func (s *Scanner) Next() bool {
 	return true
 }
 
-// Record returns the record Next just decoded. Its Key and Value alias the
-// scanner's buffer and are valid only until the next call of Next; copy them
-// to keep them.
+// Record returns the current record. Key and Value alias the scanner's buffer
+// and are valid only until the next Next; copy to keep them.
 func (s *Scanner) Record() Record { return s.rec }
 
-// RecordOffset returns where the current record starts in the file.
+// RecordOffset returns where the current record starts.
 func (s *Scanner) RecordOffset() int64 { return s.recOff }
 
-// ValueOffset returns where the current record's value starts in the file:
-// the offset KeyDir stores.
+// ValueOffset returns where the current value starts (what KeyDir stores).
 func (s *Scanner) ValueOffset() int64 { return ValueOffset(s.recOff, len(s.rec.Key)) }
 
-// Offset returns how far the scan has got: the end of the last valid record.
-// After a clean end of file it equals the size; after a failure it equals
-// the ScanError's Offset.
+// Offset returns the end of the last valid record (size after a clean EOF).
 func (s *Scanner) Offset() int64 { return s.off }
 
-// Err returns nil if the scan reached the end of the file cleanly or has not
-// finished, and otherwise a *ScanError saying where and why it stopped.
+// Err returns nil on clean EOF or while scanning, otherwise a *ScanError.
 func (s *Scanner) Err() error { return s.err }
 
 func (s *Scanner) fail(err error) bool {
@@ -159,10 +140,8 @@ func (s *Scanner) fail(err error) bool {
 	return false
 }
 
-// window returns the n file bytes starting at off, reading a new chunk if
-// they are not already buffered. n must already be validated: it is at most
-// the largest record the limits allow. If the file holds fewer than n bytes
-// from off, the error is corruption by the given rule.
+// window returns file bytes [off, off+n), reading a new chunk if not buffered.
+// n must already be validated. Too few bytes is corruption by rule.
 func (s *Scanner) window(off, n int64, rule violation) ([]byte, error) {
 	if avail := s.size - off; avail < n {
 		return nil, corrupt(rule, "have %d of %d bytes", avail, n)
@@ -181,14 +160,12 @@ func (s *Scanner) window(off, n int64, rule violation) ([]byte, error) {
 		return nil, fmt.Errorf("storage: read %d bytes at %d: %w", want, off, err)
 	}
 	if err == nil && int64(m) < want {
-		// io.ReaderAt forbids a short read without an error. Only io.EOF
-		// proves the file is short; anything else is a reader fault and must
-		// not be mistaken for corruption, or recovery would truncate.
+		// Short read with no error breaks io.ReaderAt: a reader fault, not
+		// corruption, or recovery would truncate good data.
 		return nil, fmt.Errorf("storage: read %d bytes at %d: got %d: %w", want, off, m, io.ErrUnexpectedEOF)
 	}
 	if int64(m) < n {
-		// The reader ended before the size it was given: the file is
-		// shorter than the caller believed, so the record is cut short.
+		// EOF before size: the file is shorter than expected, record is cut.
 		return nil, corrupt(rule, "file ended after %d of %d bytes", m, n)
 	}
 	s.win, s.winOff = s.buf[:m], off

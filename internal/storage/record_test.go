@@ -16,14 +16,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// goldenFiles is embedded rather than read with os, which depguard forbids in
-// this package (invariant 1).
+// goldenFiles is embedded because os is forbidden here (invariant 1).
 //
 //go:embed testdata/*.hex
 var goldenFiles embed.FS
 
-// The samples pinned by the golden files in testdata/. Parallel tests share
-// them, so they are read-only: never write into their slices.
+// Samples pinned by testdata/ golden files. Shared by parallel tests: read-only.
 var (
 	samplePut = Record{Timestamp: 1700000000123456789, Type: TypePut, Key: []byte("user"), Value: []byte("data")}
 	sampleDel = Record{Timestamp: 1700000000987654321, Type: TypeDelete, Key: []byte("user")}
@@ -40,9 +38,8 @@ func requireRule(tb testing.TB, err error, sentinel error, rule violation) {
 	assert.Contains(tb, err.Error(), string(rule))
 }
 
-// rawFrame builds header+payload by hand, independently of Encode, so tests can
-// produce frames Encode would refuse to write. With fixCRC the CRC is correct,
-// which proves that a later check (not the CRC) caught the problem.
+// rawFrame builds a frame by hand, bypassing Encode, to make invalid frames.
+// fixCRC sets a correct CRC, proving a non-CRC check caught the problem.
 func rawFrame(typ byte, keySize, valueSize uint32, payload []byte, fixCRC bool) []byte {
 	buf := make([]byte, HeaderSize, HeaderSize+len(payload))
 	binary.LittleEndian.PutUint64(buf[4:], 42)
@@ -56,8 +53,7 @@ func rawFrame(typ byte, keySize, valueSize uint32, payload []byte, fixCRC bool) 
 	return buf
 }
 
-// heapBytes reports how many heap bytes f allocates. Callers must not run in
-// parallel with other tests, or their allocations are counted too.
+// heapBytes reports heap bytes f allocates. Don't call from parallel tests.
 func heapBytes(f func()) uint64 {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
@@ -181,8 +177,8 @@ func TestDecode_RejectsCorruptRecords(t *testing.T) {
 	}
 }
 
-// Each case breaks several rules at once; the earliest rule in the order
-// header → type → limits → payload length → CRC must be the one reported.
+// Each case breaks several rules; the earliest (header → type → limits →
+// payload → CRC) must be reported.
 func TestDecode_ValidationOrder(t *testing.T) {
 	t.Parallel()
 	lim := Limits{MaxKeySize: 4, MaxValueSize: 8}
@@ -310,8 +306,7 @@ func TestDecode_DoesNotAllocateFromClaimedLengths(t *testing.T) {
 	}
 }
 
-// readGolden parses an annotated hex file: '#' starts a comment, whitespace is
-// ignored, everything else is hex.
+// readGolden parses annotated hex: '#' comments, whitespace ignored.
 func readGolden(tb testing.TB, name string) []byte {
 	tb.Helper()
 	raw, err := goldenFiles.ReadFile(path.Join("testdata", name))

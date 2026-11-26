@@ -9,13 +9,12 @@ import (
 	"syscall"
 )
 
-// isNoSpace reports whether err is the operating system's ENOSPC.
 func isNoSpace(err error) bool {
 	return errors.Is(err, syscall.ENOSPC)
 }
 
-// flockExclusive takes a non-blocking exclusive flock on f. A lock held through
-// another open file description, even in the same process, yields ErrLocked.
+// flockExclusive takes a non-blocking exclusive flock on f, retrying on EINTR.
+// A lock held by another file description, even in this process, is ErrLocked.
 func flockExclusive(f *os.File) error {
 	rc, err := f.SyscallConn()
 	if err != nil {

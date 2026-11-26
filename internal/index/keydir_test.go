@@ -11,8 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// seedFlag drives every randomized test in this package. Re-run a failure with
-// go test -run TestName ./internal/index/ -seed=<logged seed>.
+// seedFlag seeds randomized tests; re-run with -seed=<logged seed>.
 var seedFlag = flag.Uint64("seed", 1, "seed for randomized KeyDir tests")
 
 func newRand(tb testing.TB) *rand.Rand {
@@ -75,8 +74,7 @@ func TestKeyDir_PutGetDelete(t *testing.T) {
 
 func TestKeyDir_EmptyKeyIsDistinct(t *testing.T) {
 	t.Parallel()
-	// The engine rejects empty keys, but the index must still treat nil and
-	// []byte{} as the same key and not confuse it with any other.
+	// The engine rejects empty keys, but nil and []byte{} must still be one key.
 	kd := New()
 	kd.Put(nil, entry(1, 1))
 	got, ok := kd.Get([]byte{})
@@ -185,7 +183,7 @@ func TestKeyDir_UpdateIf(t *testing.T) {
 	}
 }
 
-// refMap is the mutex-protected reference model for the concurrency test.
+// refMap is the reference model for the concurrency test.
 type refMap struct {
 	// mu protects m.
 	mu sync.Mutex
@@ -211,12 +209,10 @@ func (r *refMap) del(k string) {
 	delete(r.m, k)
 }
 
-// TestKeyDir_ConcurrentMatchesModel runs writers (Put, Delete, UpdateIf) and
-// readers at the same time. Each key is owned by one writer, so the writer can
-// mirror every operation into the reference map and the final states must be
-// equal; readers share the whole key space with every writer. Every entry for
-// key i carries ValueSize == i, so a reader can tell an entry that belongs to
-// a different key, or a torn one, from a valid one.
+// TestKeyDir_ConcurrentMatchesModel runs writers and readers together. Each key
+// has one owning writer that mirrors its ops into refMap, so final states must
+// match. Entry for key i has ValueSize == i, so readers can spot a torn or
+// wrong-key entry.
 func TestKeyDir_ConcurrentMatchesModel(t *testing.T) {
 	const (
 		writers      = 4

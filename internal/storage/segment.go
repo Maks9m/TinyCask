@@ -10,27 +10,23 @@ import (
 	"github.com/Maks9m/TinyCask/internal/vfs"
 )
 
-// segment is one open data file: a regular segment or a compaction output.
-//
-// Records are only ever appended and never rewritten (invariant 4). Appends
-// go straight to the file with one Write each; there is no userspace buffer,
-// so a reader sees a record as soon as append returns.
+// segment is one open data file (regular segment or compaction output).
+// Append-only (invariant 4), one Write per record, no userspace buffer, so a
+// record is readable as soon as append returns.
 type segment struct {
 	name FileName
 	path string
 	f    vfs.File
 
-	// size is the file length the store has accepted: it grows only after a
-	// complete Write, so readers never see a torn or truncated-away tail. The
-	// appender writes it; readers and DiskBytes load it concurrently.
+	// size is the accepted length: it grows only after a complete Write, so
+	// readers never see a torn tail. Written by the appender, read concurrently.
 	size atomic.Int64
-	// sealed is set when the segment stops being the active one. A sealed
-	// segment is synced and never appended to again.
+	// sealed: no longer active, already synced, never appended to again.
 	sealed atomic.Bool
 }
 
-// createSegment creates a new, empty data file in dir. It fails if the file
-// already exists, so a segment from an earlier run is never appended to.
+// createSegment creates a new empty file; it fails if it exists, so a file from
+// an earlier run is never appended to.
 func createSegment(fsys vfs.FS, dir string, name FileName) (*segment, error) {
 	path := filepath.Join(dir, name.String())
 	f, err := fsys.Create(path)
@@ -40,7 +36,7 @@ func createSegment(fsys vfs.FS, dir string, name FileName) (*segment, error) {
 	return &segment{name: name, path: path, f: f}, nil
 }
 
-// openSegment opens an existing data file in dir as a sealed segment.
+// openSegment opens an existing file as a sealed segment.
 func openSegment(fsys vfs.FS, dir string, name FileName) (*segment, error) {
 	path := filepath.Join(dir, name.String())
 	f, err := fsys.Open(path)
@@ -49,8 +45,7 @@ func openSegment(fsys vfs.FS, dir string, name FileName) (*segment, error) {
 	}
 	size, err := f.Size()
 	if err != nil {
-		// Nothing was written through f, so a failed Close loses no data;
-		// it is still reported.
+		// Read-only handle: a failed Close loses nothing, but still report it.
 		return nil, errors.Join(fmt.Errorf("storage: size of %s: %w", path, err), f.Close())
 	}
 	s := &segment{name: name, path: path, f: f}
@@ -59,12 +54,9 @@ func openSegment(fsys vfs.FS, dir string, name FileName) (*segment, error) {
 	return s, nil
 }
 
-// append writes frame at the end of the segment with a single Write and
-// returns the offset where it starts. The caller must serialize appends.
-//
-// A failed or short write is truncated away, so the file ends at the last
-// complete record again and the error is returned. If that truncate fails too,
-// the returned error also wraps ErrSegmentDamaged (invariant 8).
+// append writes frame with one Write and returns its offset. Caller serializes.
+// A failed or short write is truncated away; if the truncate fails too, the
+// error also wraps ErrSegmentDamaged (invariant 8).
 func (s *segment) append(frame []byte) (int64, error) {
 	if s.sealed.Load() {
 		return 0, fmt.Errorf("storage: append to sealed %s", s.path)
@@ -72,7 +64,7 @@ func (s *segment) append(frame []byte) (int64, error) {
 	off := s.size.Load()
 	n, err := s.f.Write(frame)
 	if err == nil && n != len(frame) {
-		// io.Writer forbids this, but a short write must never be trusted.
+		// io.Writer forbids this, but never trust a short write.
 		err = io.ErrShortWrite
 	}
 	if err == nil {
@@ -86,9 +78,8 @@ func (s *segment) append(frame []byte) (int64, error) {
 	return 0, werr
 }
 
-// readAt reads exactly n bytes at off. A range past the accepted end of the
-// segment is reported as corruption before anything is allocated: only a
-// damaged index can ask for it.
+// readAt reads exactly n bytes at off. A range past the accepted size is
+// corruption (only a bad index asks for it), rejected before allocating.
 func (s *segment) readAt(off, n int64) ([]byte, error) {
 	if size := s.size.Load(); off < 0 || n < 0 || off > size-n {
 		return nil, fmt.Errorf("%w: read %d bytes at %d in %s: outside the %d-byte file: %w",
@@ -107,7 +98,6 @@ func (s *segment) readAt(off, n int64) ([]byte, error) {
 	return nil, fmt.Errorf("storage: read %d bytes at %d in %s: %w", n, off, s.path, err)
 }
 
-// sync flushes the segment to stable storage.
 func (s *segment) sync() error {
 	if err := s.f.Sync(); err != nil {
 		return fmt.Errorf("storage: sync %s: %w", s.path, err)
@@ -115,8 +105,8 @@ func (s *segment) sync() error {
 	return nil
 }
 
-// close closes the file handle. The caller must have removed the segment
-// from the set first so that no read is in flight (ARCHITECTURE §6).
+// close closes the file. Remove it from the set first so no read is in flight
+// (ARCHITECTURE §6).
 func (s *segment) close() error {
 	if err := s.f.Close(); err != nil {
 		return fmt.Errorf("storage: close %s: %w", s.path, err)

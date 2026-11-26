@@ -11,12 +11,10 @@ import (
 	"github.com/Maks9m/TinyCask/internal/vfs"
 )
 
-// errInjectedClose is a second injected error, for tests that fail two
-// operations in one call and must see both in the returned chain.
+// errInjectedClose is a second fault, to check both errors reach the chain.
 var errInjectedClose = errors.New("injected close fault")
 
-// writeSealedFile writes frame into a new seg_<id>.data in dir, bypassing the
-// Store, as an earlier run would have left it.
+// writeSealedFile writes seg_<id>.data directly, as an earlier run would.
 func writeSealedFile(tb testing.TB, dir string, id uint32, frame []byte) {
 	tb.Helper()
 	f, err := vfs.OSFS{}.Create(segPath(dir, id))
@@ -26,11 +24,9 @@ func writeSealedFile(tb testing.TB, dir string, id uint32, frame []byte) {
 	require.NoError(tb, f.Close())
 }
 
-// TestFault_StoreAppend_TornTailNeverVisible checks the window between a torn
-// write and its cleanup: the torn prefix is on disk, but neither ReadAt,
-// Active nor DiskBytes may expose it, before or after the truncate, and also
-// when the truncate fails and the prefix stays on disk. Out-of-space must stay
-// in the error chain next to ErrSegmentDamaged so the engine can map both.
+// TestFault_StoreAppend_TornTailNeverVisible: a torn prefix on disk is never
+// exposed by ReadAt, Active or DiskBytes, before or after truncate, even if
+// the truncate fails. ErrNoSpace stays in the chain next to ErrSegmentDamaged.
 func TestFault_StoreAppend_TornTailNeverVisible(t *testing.T) {
 	t.Parallel()
 	const torn = 7
@@ -91,9 +87,8 @@ func TestFault_StoreAppend_TornTailNeverVisible(t *testing.T) {
 	}
 }
 
-// TestFault_StoreReadAt_FullReadWithEOF checks the io.ReaderAt case where a
-// read fills the buffer and still reports io.EOF: the bytes are complete and
-// must be served, not reported as corruption.
+// TestFault_StoreReadAt_FullReadWithEOF: a full read with io.EOF is served,
+// not reported as corruption.
 func TestFault_StoreReadAt_FullReadWithEOF(t *testing.T) {
 	t.Parallel()
 	s, ffs, _ := newTestStore(t)
@@ -107,10 +102,9 @@ func TestFault_StoreReadAt_FullReadWithEOF(t *testing.T) {
 	assert.Equal(t, frame, got)
 }
 
-// TestFault_StoreCreateActive_DiscardCloseFails checks that when a created
-// segment is refused at install time and closing it fails, the file is still
-// deleted (so a retry with the same ID is not blocked by a stray file) and both
-// errors are returned.
+// TestFault_StoreCreateActive_DiscardCloseFails: if install refuses the file
+// and its Close fails, it is still deleted (so a retry works) and both errors
+// are returned.
 func TestFault_StoreCreateActive_DiscardCloseFails(t *testing.T) {
 	t.Parallel()
 	s, ffs, dir := newTestStore(t)
@@ -133,9 +127,8 @@ func TestFault_StoreCreateActive_DiscardCloseFails(t *testing.T) {
 	assert.NotErrorIs(t, s.SyncActive(), ErrSegmentDamaged, "a refused create does not damage the store")
 }
 
-// TestFault_StoreRegister_CloseFailsOnErrorPath checks that when Register
-// gives up on a file it opened and then fails to close it, both errors are
-// returned and the file is not in the set.
+// TestFault_StoreRegister_CloseFailsOnErrorPath: both errors are returned and
+// the file stays out of the set.
 func TestFault_StoreRegister_CloseFailsOnErrorPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

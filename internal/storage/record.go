@@ -12,19 +12,19 @@ import (
 //
 // Integers are little-endian. The CRC (IEEE) covers every byte after itself.
 const (
-	// HeaderSize is the fixed length of a record header in bytes.
+	// HeaderSize is the fixed header length in bytes.
 	HeaderSize = 21
 
-	// DefaultMaxKeySize is the default upper bound on key length (1 KiB).
+	// DefaultMaxKeySize is the default key limit (1 KiB).
 	DefaultMaxKeySize uint32 = 1 << 10
-	// DefaultMaxValueSize is the default upper bound on value length (1 MiB).
+	// DefaultMaxValueSize is the default value limit (1 MiB).
 	DefaultMaxValueSize uint32 = 1 << 20
 
-	// MinKeySize is the shortest key the format accepts. Empty keys are invalid.
+	// MinKeySize is the shortest valid key; empty keys are invalid.
 	MinKeySize = 1
 )
 
-// Byte offsets of the header fields.
+// Header field offsets.
 const (
 	offCRC       = 0
 	offTimestamp = offCRC + 4
@@ -34,11 +34,10 @@ const (
 	offPayload   = offValueSize + 4
 )
 
-// The field offsets above must add up to HeaderSize; this fails to compile if
-// either side drifts.
+// Compile-time check: the offsets must add up to HeaderSize.
 var _ = [1]struct{}{}[offPayload-HeaderSize]
 
-// RecordType is the one-byte record kind stored in the header.
+// RecordType is the one-byte record kind in the header.
 type RecordType uint8
 
 const (
@@ -48,19 +47,17 @@ const (
 	TypeDelete RecordType = 2
 )
 
-// Valid reports whether t is a record type known to format v1.
+// Valid reports whether t is a known v1 type.
 func (t RecordType) Valid() bool { return t == TypePut || t == TypeDelete }
 
-// Limits bounds key and value sizes. They are checked when encoding and, on
-// decode, before any length from disk is trusted. A zero field means the
-// default. The fields are uint32 because the on-disk length fields are.
+// Limits bounds key and value sizes, checked on encode and before trusting any
+// length on decode (invariant 10). Zero means the default.
 type Limits struct {
 	MaxKeySize   uint32
 	MaxValueSize uint32
 }
 
-// DefaultLimits returns the limits from ARCHITECTURE §3.1: key 1–1024 bytes,
-// value 0–1 MiB.
+// DefaultLimits returns key 1–1024 B, value 0–1 MiB (ARCHITECTURE §3.1).
 func DefaultLimits() Limits {
 	return Limits{MaxKeySize: DefaultMaxKeySize, MaxValueSize: DefaultMaxValueSize}
 }
@@ -75,15 +72,14 @@ func (l Limits) withDefaults() Limits {
 	return l
 }
 
-// MaxRecordSize is the largest frame these limits allow, header included.
+// MaxRecordSize is the largest frame allowed, header included.
 func (l Limits) MaxRecordSize() int64 {
 	l = l.withDefaults()
 	return frameSize(int64(l.MaxKeySize), int64(l.MaxValueSize))
 }
 
-// check applies the type and size rules shared by Encode and Decode, in the
-// order Decode must apply them: type first, then the limits. An empty
-// violation means the fields are acceptable.
+// check applies the rules shared by Encode and Decode: type, then limits.
+// Empty violation means OK.
 func (l Limits) check(t RecordType, keySize, valueSize uint64) (violation, string) {
 	u := func(n uint64) string { return strconv.FormatUint(n, 10) }
 	switch {
@@ -103,16 +99,13 @@ func (l Limits) check(t RecordType, keySize, valueSize uint64) (violation, strin
 
 // Record is one decoded log entry.
 type Record struct {
-	// Timestamp is Unix nanoseconds. It is informational only; ordering is
-	// always (FileID, offset).
-	Timestamp uint64
+	Timestamp uint64 // Unix ns; informational, ordering is (FileID, offset)
 	Type      RecordType
 	Key       []byte
-	// Value is empty for tombstones and for PUTs of an empty value.
-	Value []byte
+	Value     []byte // empty for tombstones
 }
 
-// Header is the fixed-size prefix of a record, decoded and validated.
+// Header is a decoded, validated record header.
 type Header struct {
 	CRC       uint32
 	Timestamp uint64
@@ -126,20 +119,18 @@ func (h Header) RecordSize() int64 {
 	return frameSize(int64(h.KeySize), int64(h.ValueSize))
 }
 
-// RecordSize returns the frame length of a record with a key of keyLen bytes
-// and a value of valueSize bytes: HeaderSize + keyLen + valueSize.
+// RecordSize returns HeaderSize + keyLen + valueSize.
 func RecordSize(keyLen int, valueSize uint32) int64 {
 	return frameSize(int64(keyLen), int64(valueSize))
 }
 
-// RecordOffset returns where a record starts, given the offset of its value
-// and its key length: valueOffset - HeaderSize - keyLen.
+// RecordOffset returns valueOffset - HeaderSize - keyLen: where the record
+// starts, from the value offset the KeyDir stores.
 func RecordOffset(valueOffset int64, keyLen int) int64 {
 	return valueOffset - HeaderSize - int64(keyLen)
 }
 
-// ValueOffset returns where a record's value starts, given the offset of the
-// record and its key length. It is the inverse of RecordOffset.
+// ValueOffset is the inverse of RecordOffset.
 func ValueOffset(recordOffset int64, keyLen int) int64 {
 	return recordOffset + HeaderSize + int64(keyLen)
 }
@@ -148,9 +139,8 @@ func frameSize(keyLen, valueSize int64) int64 {
 	return HeaderSize + keyLen + valueSize
 }
 
-// Encode validates r against lim and returns its complete frame in a single
-// newly allocated buffer, ready for one Write call. A rule violation returns
-// an error wrapping ErrInvalidRecord and nothing is allocated.
+// Encode validates r and returns its whole frame in one buffer, so it can be
+// written with one Write. Violations return ErrInvalidRecord.
 func Encode(r Record, lim Limits) ([]byte, error) {
 	lim = lim.withDefaults()
 	keySize, valueSize := uint64(len(r.Key)), uint64(len(r.Value))
@@ -158,7 +148,7 @@ func Encode(r Record, lim Limits) ([]byte, error) {
 		return nil, invalid(rule, "%s", detail)
 	}
 
-	// Both sizes fit in uint32: check bounded them by uint32 limits.
+	// The uint32 casts are safe: check bounded both sizes.
 	buf := make([]byte, RecordSize(len(r.Key), uint32(valueSize)))
 	binary.LittleEndian.PutUint64(buf[offTimestamp:], r.Timestamp)
 	buf[offType] = byte(r.Type)
@@ -170,10 +160,9 @@ func Encode(r Record, lim Limits) ([]byte, error) {
 	return buf, nil
 }
 
-// DecodeHeader parses and validates the first HeaderSize bytes of buf: length,
-// then type, then the size limits. It never looks past the header, so a reader
-// can call it before deciding how many payload bytes to read. Every failure
-// wraps ErrCorrupt.
+// DecodeHeader validates the first HeaderSize bytes (length, type, limits).
+// It never reads past the header, so callers can size the payload read from
+// it safely. Failures wrap ErrCorrupt.
 func DecodeHeader(buf []byte, lim Limits) (Header, error) {
 	if len(buf) < HeaderSize {
 		return Header{}, corrupt(violShortHeader, "have %d of %d bytes", len(buf), HeaderSize)
@@ -191,13 +180,11 @@ func DecodeHeader(buf []byte, lim Limits) (Header, error) {
 	return h, nil
 }
 
-// Decode validates buf as exactly one record, in the order header → type →
-// limits → payload length → CRC, and returns it. buf must hold the whole frame
-// and nothing else; a short or overlong buffer is corruption.
+// Decode validates buf as exactly one record (header → type → limits →
+// payload length → CRC). Failures wrap ErrCorrupt.
 //
-// Decode does not allocate: Key and Value alias buf (each capped so that
-// appending to one cannot overwrite the other). Copy them before reusing buf.
-// Every failure wraps ErrCorrupt.
+// No allocation: Key and Value alias buf, capped so appending to one can't
+// overwrite the other. Copy them before reusing buf.
 func Decode(buf []byte, lim Limits) (Record, error) {
 	h, err := DecodeHeader(buf, lim)
 	if err != nil {

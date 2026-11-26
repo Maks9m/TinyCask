@@ -1,7 +1,5 @@
 // Command tinycask runs the TinyCask key-value server.
-//
-// Only the -version flag exists so far; the server flags from ARCHITECTURE §12
-// are wired in by later tickets.
+// Only -version exists so far; server flags (ARCHITECTURE §12) come later.
 package main
 
 import (
@@ -13,10 +11,8 @@ import (
 	"runtime/debug"
 )
 
-// version is the release this source tree is working towards.
 const version = "v0.1.0-dev"
 
-// Exit codes returned by run.
 const (
 	exitOK    = 0
 	exitUsage = 2
@@ -26,9 +22,8 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run parses args and executes the command, writing normal output to stdout
-// and diagnostics to stderr. It returns the process exit code so that it can
-// be tested without calling os.Exit.
+// run executes the command and returns the exit code, so it is testable
+// without os.Exit.
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tinycask", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -61,8 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return exitUsage
 }
 
-// versionString returns "tinycask <version>", plus the VCS revision when the
-// binary was built from a git checkout.
+// versionString returns "tinycask <version>", plus the git revision if known.
 func versionString() string {
 	s := "tinycask " + version
 	info, ok := debug.ReadBuildInfo()

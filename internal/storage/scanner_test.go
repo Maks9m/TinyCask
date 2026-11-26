@@ -15,8 +15,7 @@ import (
 	"github.com/Maks9m/TinyCask/internal/vfs"
 )
 
-// scanned is one record a Scanner yielded, with Key and Value copied out of
-// the scanner's buffer.
+// scanned is a yielded record with Key and Value copied out.
 type scanned struct {
 	rec    Record
 	recOff int64
@@ -36,8 +35,7 @@ func scanAll(tb testing.TB, sc *Scanner) ([]scanned, error) {
 	return out, sc.Err()
 }
 
-// encodeAll encodes recs back to back, as a segment holds them, and returns
-// the file bytes and the offset of each record.
+// encodeAll encodes recs back to back and returns the bytes and offsets.
 func encodeAll(tb testing.TB, lim Limits, recs ...Record) ([]byte, []int64) {
 	tb.Helper()
 	var file []byte
@@ -59,8 +57,7 @@ func scanBytes(tb testing.TB, file []byte, opts ScanOptions) ([]scanned, *Scanne
 	return got, sc, err
 }
 
-// requireScanStop asserts that err is a *ScanError at offset wrapping the
-// corruption rule.
+// requireScanStop asserts a *ScanError at offset for the given rule.
 func requireScanStop(tb testing.TB, err error, offset int64, rule violation) {
 	tb.Helper()
 	var se *ScanError
@@ -121,8 +118,8 @@ func TestScanner_ManyRecords(t *testing.T) {
 	t.Parallel()
 	recs := sampleRecords()
 	file, offs := encodeAll(t, testLimits, recs...)
-	// Chunk sizes below, at and above a header and a record force every way a
-	// record can straddle the buffered window.
+	// Sizes around a header and a record hit every way a record can straddle
+	// the buffer.
 	for _, chunk := range []int{1, HeaderSize - 1, HeaderSize, 30, int(testLimits.MaxRecordSize()), 0} {
 		t.Run(fmt.Sprintf("chunk=%d", chunk), func(t *testing.T) {
 			t.Parallel()
@@ -134,9 +131,8 @@ func TestScanner_ManyRecords(t *testing.T) {
 	}
 }
 
-// TestScanner_Corruption covers every way a scan can stop early. Each case
-// starts from two valid records, so the error must carry the offset of the
-// first bad byte (the end of the good prefix), not 0 or the end of the file.
+// TestScanner_Corruption covers every early stop. Two valid records come
+// first, so the offset must be the end of that good prefix.
 func TestScanner_Corruption(t *testing.T) {
 	t.Parallel()
 	good, _ := encodeAll(t, testLimits, sampleRecords()[:2]...)
@@ -176,15 +172,13 @@ func TestScanner_Corruption(t *testing.T) {
 	}
 }
 
-// TestScanner_CRCMismatchMidFile flips one byte inside a record that is
-// followed by valid ones: the scan stops at the damaged record and yields
-// nothing after it, because nothing after a bad record can be trusted.
+// TestScanner_CRCMismatchMidFile: the scan stops at a damaged record; nothing
+// after it can be trusted.
 func TestScanner_CRCMismatchMidFile(t *testing.T) {
 	t.Parallel()
 	recs := sampleRecords()
 	file, offs := encodeAll(t, testLimits, recs...)
-	// Last byte of record 2's value: inside the payload, so only the CRC can
-	// catch it.
+	// Last value byte of record 2: only the CRC can catch it.
 	file[offs[3]-1] ^= 0x01
 
 	got, sc, err := scanBytes(t, file, ScanOptions{Limits: testLimits})
@@ -197,8 +191,7 @@ func TestScanner_CRCMismatchMidFile(t *testing.T) {
 type countingReader struct {
 	r io.ReaderAt
 
-	// mu protects the fields below. Scanners are single-goroutine; the lock
-	// only keeps the race detector honest if a test changes.
+	// mu protects the fields below (defensive; scanners are single-goroutine).
 	mu      sync.Mutex
 	maxRead int
 	reads   int
@@ -212,9 +205,8 @@ func (c *countingReader) ReadAt(p []byte, off int64) (int, error) {
 	return c.r.ReadAt(p, off)
 }
 
-// TestScanner_OversizedLengthDoesNotAllocate checks invariant 10: a header
-// that claims a 4 GiB value is rejected from the header alone, without a
-// read or a buffer sized from the claim.
+// TestScanner_OversizedLengthDoesNotAllocate (invariant 10): a 4 GiB length
+// claim is rejected from the header alone, with no read or allocation.
 func TestScanner_OversizedLengthDoesNotAllocate(t *testing.T) {
 	t.Parallel()
 	file := rawFrame(byte(TypePut), 1, math.MaxUint32, []byte("k"), true)
@@ -229,8 +221,7 @@ func TestScanner_OversizedLengthDoesNotAllocate(t *testing.T) {
 	assert.LessOrEqual(t, cap(sc.buf), chunk)
 }
 
-// TestScanner_ReadsInBoundedChunks checks that a file much larger than the
-// chunk is never read, or buffered, whole.
+// TestScanner_ReadsInBoundedChunks: a large file is never read whole.
 func TestScanner_ReadsInBoundedChunks(t *testing.T) {
 	t.Parallel()
 	var recs []Record
@@ -254,8 +245,7 @@ func TestScanner_ReadsInBoundedChunks(t *testing.T) {
 	assert.Less(t, cr.reads, len(recs))
 }
 
-// TestScanner_RecordLargerThanChunk checks that a record over the chunk size
-// is read with one ReadAt of exactly its own length.
+// TestScanner_RecordLargerThanChunk: such a record is read in one exact ReadAt.
 func TestScanner_RecordLargerThanChunk(t *testing.T) {
 	t.Parallel()
 	big := Record{Type: TypePut, Key: []byte("big"), Value: bytes.Repeat([]byte("v"), int(DefaultMaxValueSize))}
@@ -273,8 +263,8 @@ func TestScanner_RecordLargerThanChunk(t *testing.T) {
 	assert.Equal(t, bigSize, cap(sc.buf))
 }
 
-// TestScanner_RecordAliasesBuffer documents that Record is only valid until
-// the next call of Next, and that its slices cannot overwrite each other.
+// TestScanner_RecordAliasesBuffer: Record is valid only until the next Next,
+// and its slices can't overwrite each other.
 func TestScanner_RecordAliasesBuffer(t *testing.T) {
 	t.Parallel()
 	file, _ := encodeAll(t, testLimits, samplePut)
@@ -285,8 +275,7 @@ func TestScanner_RecordAliasesBuffer(t *testing.T) {
 	assert.Equal(t, len(r.Value), cap(r.Value))
 }
 
-// TestScanner_SizeBoundsTheScan checks that the scanner stops at the size it
-// was given, even if the reader holds more bytes.
+// TestScanner_SizeBoundsTheScan: the scan stops at size even if more bytes exist.
 func TestScanner_SizeBoundsTheScan(t *testing.T) {
 	t.Parallel()
 	recs := sampleRecords()
@@ -297,8 +286,8 @@ func TestScanner_SizeBoundsTheScan(t *testing.T) {
 	requireRecords(t, recs[:2], offs[:2], got)
 }
 
-// TestScanner_FileShorterThanSize covers a reader that ends before the size
-// the caller passed (the file shrank under it): the cut record is corrupt.
+// TestScanner_FileShorterThanSize: if the file ends before size, the cut
+// record is corrupt.
 func TestScanner_FileShorterThanSize(t *testing.T) {
 	t.Parallel()
 	recs := sampleRecords()
@@ -327,8 +316,7 @@ func TestScanner_NegativeSize(t *testing.T) {
 	assert.NotErrorIs(t, sc.Err(), ErrCorrupt)
 }
 
-// eofReader returns io.EOF together with a full read whenever the read
-// reaches the end of the data, which io.ReaderAt allows.
+// eofReader returns io.EOF with a full read at end of data (allowed by io.ReaderAt).
 type eofReader struct{ data []byte }
 
 func (e eofReader) ReadAt(p []byte, off int64) (int, error) {
@@ -339,8 +327,7 @@ func (e eofReader) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
-// shortReader breaks the io.ReaderAt contract: it returns at most limit bytes
-// and no error.
+// shortReader breaks io.ReaderAt: at most limit bytes and no error.
 type shortReader struct {
 	data  []byte
 	limit int
@@ -350,8 +337,8 @@ func (s shortReader) ReadAt(p []byte, off int64) (int, error) {
 	return copy(p[:min(len(p), s.limit)], s.data[off:]), nil
 }
 
-// TestScanner_ShortReadWithoutErrorIsNotCorruption keeps a misbehaving reader
-// from making recovery truncate good data.
+// TestScanner_ShortReadWithoutErrorIsNotCorruption: a bad reader must not make
+// recovery truncate good data.
 func TestScanner_ShortReadWithoutErrorIsNotCorruption(t *testing.T) {
 	t.Parallel()
 	file, _ := encodeAll(t, testLimits, sampleRecords()...)
@@ -374,8 +361,8 @@ func TestScanner_AcceptsEOFWithFullRead(t *testing.T) {
 	requireRecords(t, recs, offs, got)
 }
 
-// TestScanner_RandomLog scans seeded random logs with random chunk sizes and,
-// half the time, a random cut, and checks the result against the encoder.
+// TestScanner_RandomLog scans seeded random logs (random chunks, sometimes cut)
+// and checks against the encoder.
 func TestScanner_RandomLog(t *testing.T) {
 	t.Parallel()
 	rng := testRand(t)
@@ -425,9 +412,8 @@ func TestScanner_RandomLog(t *testing.T) {
 	}
 }
 
-// TestScanner_StoreSegmentOnDisk is the week-1 end-to-end check: records
-// appended through a Store to real files are scanned back from disk at the
-// offsets Append returned, across a roll.
+// TestScanner_StoreSegmentOnDisk (week-1 end-to-end): records appended via a
+// Store, across a roll, scan back at the offsets Append returned.
 func TestScanner_StoreSegmentOnDisk(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -460,9 +446,8 @@ func TestScanner_StoreSegmentOnDisk(t *testing.T) {
 		require.NoError(t, f.Close())
 		requireRecords(t, recs, offsByID[id], got)
 
-		// The value offset the scanner reports is where Store.ReadAt finds
-		// the value: what KeyDir will store after recovery. Store.ReadAt
-		// refuses empty reads, so records without a value are skipped.
+		// The scanner's value offset (what KeyDir stores) must work with
+		// Store.ReadAt. Empty values are skipped: ReadAt refuses n=0.
 		for _, g := range got {
 			if len(g.rec.Value) == 0 {
 				continue

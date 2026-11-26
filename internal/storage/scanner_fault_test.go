@@ -8,8 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// writeSegment appends recs to seg_1.data through a Store on ffs, syncs it,
-// and returns the record offsets and the file size.
+// writeSegment writes recs to seg_1.data via a Store and returns offsets and size.
 func writeSegment(tb testing.TB, ffs *faultFS, dir string, recs []Record) ([]int64, int64) {
 	tb.Helper()
 	s := NewStore(ffs, dir, StoreOptions{Limits: testLimits})
@@ -26,9 +25,8 @@ func writeSegment(tb testing.TB, ffs *faultFS, dir string, recs []Record) ([]int
 	return offs, size
 }
 
-// TestFault_Scanner_ReadError checks that an I/O error is reported as such,
-// at the offset of the record being read, and never as corruption: recovery
-// must fail Open on it rather than truncate good data away.
+// TestFault_Scanner_ReadError: an I/O error is never reported as corruption,
+// so recovery fails Open instead of truncating good data.
 func TestFault_Scanner_ReadError(t *testing.T) {
 	t.Parallel()
 	recs := sampleRecords()
@@ -44,9 +42,8 @@ func TestFault_Scanner_ReadError(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, f.Close()) })
 
-			// The armed read is the first one: record 0's header. Even a read
-			// that delivered the whole header before failing must not be
-			// trusted, because its error was not io.EOF.
+			// The first read (record 0's header) fails. Even a full header
+			// isn't trusted, since the error wasn't io.EOF.
 			sc := NewScanner(f, size, ScanOptions{Limits: testLimits, ChunkSize: HeaderSize})
 			ffs.arm(opRead, fault{err: errInjected, n: partial})
 			got, err := scanAll(t, sc)
@@ -62,8 +59,8 @@ func TestFault_Scanner_ReadError(t *testing.T) {
 	}
 }
 
-// TestFault_Scanner_ReadErrorMidFile fails a read after some records were
-// already yielded: the stop offset is the end of the last yielded record.
+// TestFault_Scanner_ReadErrorMidFile: stop offset is the end of the last
+// yielded record.
 func TestFault_Scanner_ReadErrorMidFile(t *testing.T) {
 	t.Parallel()
 	recs := sampleRecords()

@@ -1,6 +1,5 @@
-// Package simfs is an in-memory vfs.FS with deterministic fault injection:
-// failing the Nth call of an operation, tearing a write and crashing, a disk
-// quota, and discarding unsynced bytes on restart (ARCHITECTURE §11).
+// Package simfs is an in-memory vfs.FS with deterministic fault injection
+// (failed calls, torn writes, disk quota, lost unsynced bytes; ARCHITECTURE §11).
 //
-// It exists for tests only and must never be imported from a non-test file.
+// Tests only: never import it from a non-test file.
 package simfs

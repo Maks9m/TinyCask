@@ -1,5 +1,5 @@
-// Package vfstest is the conformance suite every vfs.FS implementation must
-// pass (ARCHITECTURE §11, §13). It is imported only from _test.go files.
+// Package vfstest is the conformance suite every vfs.FS must pass
+// (ARCHITECTURE §11, §13). Import only from _test.go files.
 package vfstest
 
 import (
@@ -18,10 +18,8 @@ import (
 // filePrefix is the content most cases write before checking a behavior.
 const filePrefix = "hello world"
 
-// RunFSTests runs the conformance suite against the FS that newFS returns.
-// newFS is called once per subtest and must return a fresh, independent FS.
-// Every subtest works in its own directory under t.TempDir(), so an in-memory
-// FS sees ordinary absolute paths and OSFS stays inside the test's temp dir.
+// RunFSTests runs the suite; newFS must return a fresh FS per subtest. Each
+// subtest uses its own t.TempDir(), so paths are real and OSFS stays contained.
 func RunFSTests(t *testing.T, newFS func(t testing.TB) vfs.FS) {
 	t.Helper()
 

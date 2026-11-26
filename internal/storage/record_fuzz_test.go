@@ -6,14 +6,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// FuzzDecodeRecord feeds arbitrary bytes to Decode and checks three things:
-// it never panics, it never allocates more than the limits allow (a lying
-// length field must not turn into a huge allocation), and any input it accepts
-// re-encodes to exactly the same bytes.
+// FuzzDecodeRecord checks that Decode never panics, never allocates beyond the
+// limits (a lying length must not cause a huge allocation), and that accepted
+// input re-encodes to the same bytes.
 //
-// heapBytes measures the whole process, so the bound is the largest legal
-// frame rather than zero; a decoder that trusted a 4 GiB length would still
-// blow far past it.
+// heapBytes is process-wide, so the bound is the largest legal frame, not 0;
+// trusting a 4 GiB length would still blow past it.
 func FuzzDecodeRecord(f *testing.F) {
 	lim := DefaultLimits()
 

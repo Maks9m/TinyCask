@@ -7,8 +7,7 @@ import (
 	"strings"
 )
 
-// FileKind says which of the data-directory files a name refers to
-// (ARCHITECTURE §3.2).
+// FileKind is the type of a data-directory file (ARCHITECTURE §3.2).
 type FileKind uint8
 
 const (
@@ -17,22 +16,19 @@ const (
 	// KindCompact is a finished compaction output, compact_<id>.data. It
 	// supersedes every data file with a lower ID.
 	KindCompact
-	// KindCompactTmp is an unfinished compaction output, compact_<id>.tmp.
-	// Recovery deletes it.
+	// KindCompactTmp is an unfinished compaction output; recovery deletes it.
 	KindCompactTmp
 )
 
-// idDigits is the fixed width of the ID in a file name: enough for any uint32.
+// idDigits is the zero-padded ID width: enough for any uint32.
 const idDigits = 10
 
-// fileNamePattern is the prefix and suffix around the ID for one FileKind.
 type fileNamePattern struct {
 	kind           FileKind
 	prefix, suffix string
 }
 
-// fileNamePatterns lists every kind ParseFileName recognizes. It is a
-// function, not a package-level var, so there is no mutable package state
+// fileNamePatterns is a function, not a var, to avoid mutable package state
 // (ARCHITECTURE §2, hard rule 4).
 func fileNamePatterns() [3]fileNamePattern {
 	return [...]fileNamePattern{
@@ -42,7 +38,7 @@ func fileNamePatterns() [3]fileNamePattern {
 	}
 }
 
-// String returns the kind's name for logs and error messages.
+// String returns the kind's name for logs.
 func (k FileKind) String() string {
 	switch k {
 	case KindSegment:
@@ -61,8 +57,7 @@ type FileName struct {
 	ID   uint32
 }
 
-// String returns the base name of the file, for example seg_0000000007.data.
-// It returns an empty string for an unknown kind.
+// String returns the base name, e.g. seg_0000000007.data ("" for unknown kind).
 func (n FileName) String() string {
 	for _, p := range fileNamePatterns() {
 		if p.kind == n.Kind {
@@ -72,27 +67,23 @@ func (n FileName) String() string {
 	return ""
 }
 
-// Readable reports whether the file holds records the store may serve: a
-// segment or a finished compaction output.
+// Readable reports whether the file holds servable records (segment or compact).
 func (n FileName) Readable() bool {
 	return n.Kind == KindSegment || n.Kind == KindCompact
 }
 
-// SegmentName returns the base name of regular segment id.
+// SegmentName returns seg_<id>.data.
 func SegmentName(id uint32) string { return FileName{KindSegment, id}.String() }
 
-// CompactName returns the base name of finished compaction output id.
+// CompactName returns compact_<id>.data.
 func CompactName(id uint32) string { return FileName{KindCompact, id}.String() }
 
-// CompactTmpName returns the base name of unfinished compaction output id.
+// CompactTmpName returns compact_<id>.tmp.
 func CompactTmpName(id uint32) string { return FileName{KindCompactTmp, id}.String() }
 
-// ParseFileName parses a base name from the data directory.
-//
-// A name that matches none of the data-file patterns (for example LOCK) is
-// not a data file: ok is false and err is nil, and the caller ignores it. A
-// name with a data-file prefix and suffix but a malformed ID returns an error
-// wrapping ErrBadFileName.
+// ParseFileName parses a base name from the data directory. A non-data name
+// (e.g. LOCK) gives ok=false, err=nil, and is ignored. A data-file pattern with
+// a malformed ID gives ErrBadFileName.
 func ParseFileName(base string) (name FileName, ok bool, err error) {
 	for _, p := range fileNamePatterns() {
 		digits, found := strings.CutPrefix(base, p.prefix)
@@ -111,7 +102,7 @@ func ParseFileName(base string) (name FileName, ok bool, err error) {
 	return FileName{}, false, nil
 }
 
-// parseID accepts exactly idDigits ASCII digits whose value fits in a uint32.
+// parseID accepts exactly idDigits digits that fit in a uint32.
 func parseID(s string) (uint32, error) {
 	if len(s) != idDigits {
 		return 0, fmt.Errorf("id %q has %d characters, want %d digits", s, len(s), idDigits)

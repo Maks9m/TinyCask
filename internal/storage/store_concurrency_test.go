@@ -20,11 +20,9 @@ type storedFrame struct {
 	frame []byte
 }
 
-// TestStore_ConcurrentReadAppendDrop runs readers against sealed files that a
-// dropper removes and against an active segment a writer appends to. Every
-// read must return exactly the bytes written or, for a dropped file,
-// ErrSegmentNotFound; never a read on a closed file (ARCHITECTURE §6). On
-// OSFS, so a real closed descriptor would surface as an error.
+// TestStore_ConcurrentReadAppendDrop: readers race a dropper and a writer.
+// Every read returns the written bytes or ErrSegmentNotFound, never a read on
+// a closed file (ARCHITECTURE §6). Runs on OSFS so a closed fd would show.
 func TestStore_ConcurrentReadAppendDrop(t *testing.T) {
 	t.Parallel()
 	const (
@@ -50,8 +48,7 @@ func TestStore_ConcurrentReadAppendDrop(t *testing.T) {
 	}
 	const activeID = sealedFiles + 1
 
-	// The writer fills in active[i].off and then publishes i+1; readers only
-	// touch entries below the published count.
+	// The writer sets active[i].off, then publishes i+1; readers stay below it.
 	active := make([]storedFrame, activeFrames)
 	for i := range active {
 		active[i] = storedFrame{id: activeID, frame: testFrame(t, fmt.Sprintf("a%d", i), rng.IntN(int(testLimits.MaxValueSize)+1))}
@@ -127,8 +124,7 @@ func TestStore_ConcurrentReadAppendDrop(t *testing.T) {
 	wg.Wait()
 	t.Logf("sealed reads: %d served, %d after drop", hits.Load(), misses.Load())
 
-	// Final state: every sealed file is gone, every append is readable, and
-	// the accounting matches the disk.
+	// Final: sealed files gone, appends readable, accounting matches disk.
 	for _, x := range sealed {
 		_, err := s.ReadAt(x.id, x.off, int64(len(x.frame)))
 		require.ErrorIs(t, err, ErrSegmentNotFound)

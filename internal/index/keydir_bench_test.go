@@ -14,8 +14,7 @@ const (
 	benchIDBytes   = 8 // a unique big-endian counter prefix keeps keys distinct
 )
 
-// benchKeySet returns benchKeys distinct keys of benchMinKeyLen..benchMaxKeyLen
-// bytes, derived from a fixed seed so runs are comparable.
+// benchKeySet returns distinct random keys from a fixed seed, so runs compare.
 func benchKeySet() [][]byte {
 	r := rand.New(rand.NewPCG(1, 2))
 	keys := make([][]byte, benchKeys)
@@ -30,8 +29,7 @@ func benchKeySet() [][]byte {
 	return keys
 }
 
-// heapAlloc returns the bytes held by live heap objects after a full GC
-// (MemStats.HeapAlloc, not the span-level HeapInuse).
+// heapAlloc returns live heap bytes after a full GC (HeapAlloc).
 func heapAlloc() uint64 {
 	runtime.GC()
 	var ms runtime.MemStats
@@ -39,10 +37,8 @@ func heapAlloc() uint64 {
 	return ms.HeapAlloc
 }
 
-// BenchmarkKeyDir_Insert1M inserts one million keys into an empty KeyDir and
-// reports the live heap the KeyDir holds per key (heap-B/key), which is the
-// number to compare with the design doc's 100–150 MB per million keys
-// (design doc §4.3). It does not assert on it.
+// BenchmarkKeyDir_Insert1M inserts 1M keys and reports heap-B/key, to compare
+// with the design doc's 100–150 MB per million keys (§4.3). No assertion.
 func BenchmarkKeyDir_Insert1M(b *testing.B) {
 	keys := benchKeySet()
 	var keyBytes int
